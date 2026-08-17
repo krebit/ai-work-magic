@@ -65,6 +65,9 @@ const EnvSchema = z.object({
   DEN_DIAGNOSTICS_BEARER_TOKEN: z.string().optional(),
   DEN_GATEWAY_KEY: z.string().optional(),
   DEN_GATEWAY_ORIGIN: z.string().optional(),
+  AMM_API_BASE_URL: z.string().url().optional(),
+  DEN_TO_AMM_SERVICE_KEY: z.string().min(32).optional(),
+  AMM_REQUEST_TIMEOUT_MS: z.string().optional(),
   DEN_GOOGLE_OAUTH_AUTHORIZE_URL: z.string().optional(),
   DEN_GOOGLE_OAUTH_TOKEN_URL: z.string().optional(),
   DEN_GOOGLE_OAUTH_USERINFO_URL: z.string().optional(),
@@ -488,6 +491,16 @@ const port = Number(parsed.PORT ?? "8790")
 const daytonaSandboxPublic =
   (parsed.DAYTONA_SANDBOX_PUBLIC ?? "false").toLowerCase() === "true"
 
+const ammApiBaseUrl = optionalString(parsed.AMM_API_BASE_URL)
+const denToAmmServiceKey = optionalString(parsed.DEN_TO_AMM_SERVICE_KEY)
+const amm = ammApiBaseUrl && denToAmmServiceKey
+  ? {
+      baseUrl: ammApiBaseUrl.replace(/\/+$/, ""),
+      serviceKey: denToAmmServiceKey,
+      timeoutMs: automationTuning(parsed.AMM_REQUEST_TIMEOUT_MS, 10_000),
+    }
+  : null
+
 const planetscaleCredentials =
   parsed.DATABASE_HOST && parsed.DATABASE_USERNAME && parsed.DATABASE_PASSWORD !== undefined
     ? {
@@ -531,6 +544,7 @@ export const env = {
   },
   gatewayKey: optionalString(parsed.DEN_GATEWAY_KEY),
   gatewayOrigin: normalizeOptionalHttpsOrigin("DEN_GATEWAY_ORIGIN", parsed.DEN_GATEWAY_ORIGIN),
+  amm,
   planGatingEnabled,
   installLinksGatingEnabled,
   connectLink,

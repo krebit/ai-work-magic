@@ -27,10 +27,12 @@ describe("portfolio client", () => {
     await client.getPortfolio("ws one");
     await client.initializePortfolio("ws one", { name: "Studio" });
     await client.createPortfolioProject("ws one", { idempotencyKey: "p1", title: "Novel", kind: "book", vertical: "publishing", lifecycleStage: "research" });
+    await client.getPortfolioResearchHistory("ws one", "research one");
     expect(requests).toEqual([
       { method: "GET", path: "/workspace/ws%20one/portfolio", body: null },
       { method: "POST", path: "/workspace/ws%20one/portfolio", body: { name: "Studio" } },
       { method: "POST", path: "/workspace/ws%20one/portfolio/projects", body: { idempotencyKey: "p1", title: "Novel", kind: "book", vertical: "publishing", lifecycleStage: "research" } },
+      { method: "GET", path: "/workspace/ws%20one/portfolio/projects/research%20one/research", body: null },
     ]);
   });
 });

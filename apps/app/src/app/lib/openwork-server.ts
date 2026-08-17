@@ -167,6 +167,12 @@ export type CreatePortfolioProjectInput = {
   vertical: string;
   lifecycleStage: PortfolioLifecycleStage;
 };
+export type PortfolioResearchRun = { id: string; projectId: string; researchType: string; status: "planned" | "running" | "completed" | "partial" | "failed" | "cancelled"; trigger: string; requestPayload: Record<string, unknown>; requestDigest: string; startedAt: string; completedAt: string | null; createdAt: string };
+export type PortfolioResearchSnapshot = { id: string; projectId: string; runId: string; sequence: number; state: "complete" | "partial" | "invalid"; capturedAt: string; sealedAt: string; supersedesSnapshotId: string | null; canonicalPayload: Record<string, unknown>; canonicalPayloadDigest: string; diagnosticSummary: Record<string, unknown> };
+export type PortfolioResearchObservation = { id: string; snapshotId: string; subjectType: string; subjectKey: string; metric: string; valueType: "string" | "integer" | "decimal" | "boolean" | "json"; canonicalValue: unknown; unit: string | null; provider: string | null; providerVersion: string | null; observedAt: string; evidenceRefs: string[]; observationDigest: string };
+export type PortfolioResearchEvaluation = { id: string; projectId: string; snapshotId: string; evaluationType: string; policyRef: string; engineRef: string | null; evaluationAsOf: string; requestPayload: Record<string, unknown>; requestDigest: string; resultPayload: Record<string, unknown>; resultDigest: string; createdAt: string };
+export type PortfolioResearchDecision = { id: string; projectId: string; evaluationId: string | null; decision: "accept" | "reject" | "more-research"; rationale: string; selectedSubjectRefs: string[]; requestedFollowUp: string[]; actorRef: string; decidedAt: string; supersedesDecisionId: string | null };
+export type PortfolioResearchHistory = { runs: PortfolioResearchRun[]; snapshots: PortfolioResearchSnapshot[]; observations: PortfolioResearchObservation[]; evaluations: PortfolioResearchEvaluation[]; decisions: PortfolioResearchDecision[] };
 
 export type OpenworkServerDiagnostics = {
   ok: boolean;
@@ -1566,6 +1572,8 @@ export function createOpenworkServerClient(options: { baseUrl: string; token?: s
       requestJson<PortfolioProject>(baseUrl, `/workspace/${encodeURIComponent(workspaceId)}/portfolio/projects`, { token, method: "POST", body, timeoutMs: timeouts.config }),
     updatePortfolioProject: (workspaceId: string, projectId: string, body: { expectedRevision: number; title?: string; kind?: string; vertical?: string; lifecycleStage?: PortfolioLifecycleStage; parentProjectId?: string | null }) =>
       requestJson<PortfolioProject>(baseUrl, `/workspace/${encodeURIComponent(workspaceId)}/portfolio/projects/${encodeURIComponent(projectId)}`, { token, method: "PATCH", body, timeoutMs: timeouts.config }),
+    getPortfolioResearchHistory: (workspaceId: string, projectId: string) =>
+      requestJson<PortfolioResearchHistory>(baseUrl, `/workspace/${encodeURIComponent(workspaceId)}/portfolio/projects/${encodeURIComponent(projectId)}/research`, { token, timeoutMs: timeouts.config }),
     createLocalWorkspace: (payload: { folderPath: string; name: string; preset: string }) =>
       requestJson<WorkspaceList>(baseUrl, "/workspaces/local", {
         token,

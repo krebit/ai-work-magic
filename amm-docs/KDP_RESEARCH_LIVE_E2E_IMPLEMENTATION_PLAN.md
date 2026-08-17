@@ -775,6 +775,21 @@ VITE_DEN_BASE_URL=http://localhost:3005 pnpm dev:headless-web --detach --replace
 ```
 
 Read `tmp/dev-headless-web.json` for `webUrl`; do not print its bearer tokens.
+When you need the browser URL, read only the `webUrl` field:
+
+```bash
+cd /home/alerios/Tech/ai-agents/ai-work-magic
+node -e "console.log(JSON.parse(require('node:fs').readFileSync('tmp/dev-headless-web.json', 'utf8')).webUrl)"
+```
+
+Terminal F — local readiness check:
+
+```bash
+cd /home/alerios/Tech/ai-agents/ai-work-magic
+pnpm amm:kdp:preflight
+```
+
+Interpret the result strictly: `status: "ready"` means every endpoint returned HTTP 200 and every required secret is `present`; `status: "incomplete"` means at least one dependency is unavailable or missing and should be fixed before continuing.
 
 - [ ] **Step 4: Verify and commit**
 

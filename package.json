@@ -33,6 +33,8 @@
     "dev:den:seed-demo": "pnpm dev:den:mysql && pnpm dev:den:db-push && pnpm --filter @openwork-ee/den-api seed:demo-org",
     "dev:den:seed-demo:reset": "pnpm --filter @openwork-ee/den-api run seed:demo-org -- --reset",
     "dev:headless-web": "OPENWORK_DEV_MODE=1 bun scripts/dev-headless-web.ts",
+    "amm:kdp:preflight": "node scripts/amm-kdp-live-preflight.mjs",
+    "amm:kdp:headless": "VITE_DEN_BASE_URL=http://localhost:3005 pnpm dev:headless-web",
     "build": "node scripts/build.mjs",
     "build:ui": "pnpm --filter @openwork/app build",
     "build:web": "pnpm --filter @openwork-ee/den-web build",

@@ -59,7 +59,11 @@ export async function ensureDemoAmmUsageBucket(input: {
       bucket.windowStartAt <= input.now && bucket.windowEndAt > input.now
     ))
 
-    if (currentBuckets.length === 1 && currentBuckets[0]?.limitUnits === DEMO_AMM_USAGE_LIMIT_UNITS) {
+    if (
+      existingBuckets.length === 1
+      && currentBuckets.length === 1
+      && currentBuckets[0]?.limitUnits === DEMO_AMM_USAGE_LIMIT_UNITS
+    ) {
       return currentBuckets[0]
     }
 

@@ -170,6 +170,32 @@ test("ordinary demo seed preserves historical AMM accounting and requires reset"
   expect(store.events).toEqual([`lock:${demoOrganizationId}`])
 })
 
+test("ordinary demo seed rejects mixed historical and current buckets without mutation", async () => {
+  const store = new MemoryDemoAmmSeedStore()
+  const historicalBucket = store.seedBucket({
+    limitUnits: 100,
+    organizationId: demoOrganizationId,
+    windowEndAt: new Date(now.getTime() - 1),
+    windowStartAt: new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000),
+  })
+  const currentBucket = store.seedBucket({
+    limitUnits: 100,
+    organizationId: demoOrganizationId,
+    windowEndAt: new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000),
+    windowStartAt: now,
+  })
+  store.ledgerOrganizationIds.add(demoOrganizationId)
+  store.operationOrganizationIds.add(demoOrganizationId)
+
+  await expect(ensureDemoAmmUsageBucket({ now, organizationId: demoOrganizationId, store }))
+    .rejects.toThrow("requires --reset")
+
+  expect(store.bucketsFor(demoOrganizationId)).toEqual([historicalBucket, currentBucket])
+  expect(store.ledgerOrganizationIds.has(demoOrganizationId)).toBe(true)
+  expect(store.operationOrganizationIds.has(demoOrganizationId)).toBe(true)
+  expect(store.events).toEqual([`lock:${demoOrganizationId}`])
+})
+
 test("ordinary demo seed preserves a future AMM bucket and requires reset", async () => {
   const store = new MemoryDemoAmmSeedStore()
   const futureBucket = store.seedBucket({
@@ -183,6 +209,32 @@ test("ordinary demo seed preserves a future AMM bucket and requires reset", asyn
     .rejects.toThrow("requires --reset")
 
   expect(store.bucketsFor(demoOrganizationId)).toEqual([futureBucket])
+  expect(store.events).toEqual([`lock:${demoOrganizationId}`])
+})
+
+test("ordinary demo seed rejects mixed current and future buckets without mutation", async () => {
+  const store = new MemoryDemoAmmSeedStore()
+  const currentBucket = store.seedBucket({
+    limitUnits: 100,
+    organizationId: demoOrganizationId,
+    windowEndAt: new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000),
+    windowStartAt: now,
+  })
+  const futureBucket = store.seedBucket({
+    limitUnits: 100,
+    organizationId: demoOrganizationId,
+    windowEndAt: new Date(now.getTime() + 31 * 24 * 60 * 60 * 1000),
+    windowStartAt: new Date(now.getTime() + 24 * 60 * 60 * 1000),
+  })
+  store.ledgerOrganizationIds.add(demoOrganizationId)
+  store.operationOrganizationIds.add(demoOrganizationId)
+
+  await expect(ensureDemoAmmUsageBucket({ now, organizationId: demoOrganizationId, store }))
+    .rejects.toThrow("requires --reset")
+
+  expect(store.bucketsFor(demoOrganizationId)).toEqual([currentBucket, futureBucket])
+  expect(store.ledgerOrganizationIds.has(demoOrganizationId)).toBe(true)
+  expect(store.operationOrganizationIds.has(demoOrganizationId)).toBe(true)
   expect(store.events).toEqual([`lock:${demoOrganizationId}`])
 })
 

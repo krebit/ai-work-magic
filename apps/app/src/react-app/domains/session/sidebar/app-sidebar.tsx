@@ -11,6 +11,7 @@ import {
   ChevronRight,
   Columns2,
   FolderPlus,
+  FolderKanban,
   LayoutGrid,
   MoreHorizontal,
   Pencil,
@@ -850,6 +851,8 @@ export type AppSidebarProps = {
   automationsActive?: boolean;
   automationsNeedAttention?: boolean;
   onOpenAutomations?: () => void;
+  portfolioActive?: boolean;
+  onOpenPortfolio?: () => void;
   /** Opens the cross-session message search dialog (Cmd/Ctrl+Shift+F). */
   onOpenSessionSearch?: () => void;
   /** Back/forward across recently viewed conversations, rendered at the top of the sidebar. */
@@ -1162,6 +1165,9 @@ export function AppSidebar(props: AppSidebarProps) {
                 )}
                 onSelect={props.onOpenAutomations}
               />
+            ) : null}
+            {props.onOpenPortfolio ? (
+              <SidebarDestination active={props.portfolioActive === true} icon={FolderKanban} label="Portfolio" onSelect={props.onOpenPortfolio} />
             ) : null}
             <SidebarDestination
               active={props.extensionsActive === true}

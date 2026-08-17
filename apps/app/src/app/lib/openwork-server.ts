@@ -141,6 +141,33 @@ function parseCloudProviderSyncStatus(value: unknown): OpenworkCloudProviderSync
 
 export type OpenworkServerStatus = "connected" | "disconnected" | "limited";
 
+export type PortfolioLifecycleStage = "research" | "planning" | "creation" | "review" | "release" | "publication" | "promotion" | "measurement" | "archived";
+export type PortfolioProject = {
+  id: string;
+  parentProjectId: string | null;
+  title: string;
+  kind: string;
+  vertical: string;
+  lifecycleStage: PortfolioLifecycleStage;
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+};
+export type PortfolioSnapshot = {
+  portfolio: { id: string; name: string; defaultVertical: string | null; createdAt: string; updatedAt: string };
+  projects: PortfolioProject[];
+  relationships: Array<{ id: string; sourceProjectId: string; targetProjectId: string; type: string; createdAt: string }>;
+};
+export type PortfolioInspection = { state: "uninitialized" } | { state: "ready"; snapshot: PortfolioSnapshot };
+export type CreatePortfolioProjectInput = {
+  idempotencyKey: string;
+  parentProjectId?: string;
+  title: string;
+  kind: string;
+  vertical: string;
+  lifecycleStage: PortfolioLifecycleStage;
+};
+
 export type OpenworkServerDiagnostics = {
   ok: boolean;
   version: string;
@@ -1529,6 +1556,16 @@ export function createOpenworkServerClient(options: { baseUrl: string; token?: s
         timeoutMs: timeouts.binary,
       }),
     listWorkspaces: () => requestJson<OpenworkWorkspaceList>(baseUrl, "/workspaces", { token, hostToken, timeoutMs: timeouts.listWorkspaces }),
+    getPortfolio: (workspaceId: string) =>
+      requestJson<PortfolioInspection>(baseUrl, `/workspace/${encodeURIComponent(workspaceId)}/portfolio`, { token, timeoutMs: timeouts.config }),
+    initializePortfolio: (workspaceId: string, body: { name: string; defaultVertical?: string }) =>
+      requestJson<{ state: "ready"; snapshot: PortfolioSnapshot }>(baseUrl, `/workspace/${encodeURIComponent(workspaceId)}/portfolio`, { token, method: "POST", body, timeoutMs: timeouts.config }),
+    listPortfolioProjects: (workspaceId: string) =>
+      requestJson<{ items: PortfolioProject[] }>(baseUrl, `/workspace/${encodeURIComponent(workspaceId)}/portfolio/projects`, { token, timeoutMs: timeouts.config }),
+    createPortfolioProject: (workspaceId: string, body: CreatePortfolioProjectInput) =>
+      requestJson<PortfolioProject>(baseUrl, `/workspace/${encodeURIComponent(workspaceId)}/portfolio/projects`, { token, method: "POST", body, timeoutMs: timeouts.config }),
+    updatePortfolioProject: (workspaceId: string, projectId: string, body: { expectedRevision: number; title?: string; kind?: string; vertical?: string; lifecycleStage?: PortfolioLifecycleStage; parentProjectId?: string | null }) =>
+      requestJson<PortfolioProject>(baseUrl, `/workspace/${encodeURIComponent(workspaceId)}/portfolio/projects/${encodeURIComponent(projectId)}`, { token, method: "PATCH", body, timeoutMs: timeouts.config }),
     createLocalWorkspace: (payload: { folderPath: string; name: string; preset: string }) =>
       requestJson<WorkspaceList>(baseUrl, "/workspaces/local", {
         token,

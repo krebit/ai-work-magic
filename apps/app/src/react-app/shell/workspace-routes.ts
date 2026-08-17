@@ -8,6 +8,10 @@ export function workspaceSessionRoute(workspaceId: string, sessionId?: string | 
     : `/workspace/${workspace}/session`;
 }
 
+export function workspacePortfolioRoute(workspaceId: string) {
+  return `/workspace/${encodeURIComponent(workspaceId.trim())}/portfolio`;
+}
+
 export function workspaceSettingsRoute(
   workspaceId: string,
   tab: SettingsTab | "extensions/mcp" | "extensions/plugins" | string = "general",

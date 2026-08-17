@@ -207,11 +207,13 @@ import {
 } from "./cloud-workspace-status";
 import { getReactQueryClient } from "@/react-app/infra/query-client";
 import { useSessionControlActions } from "@/react-app/domains/session/control/session-control-actions";
+import { PortfolioPage } from "@/react-app/domains/portfolio/portfolio-page";
 import {
   globalExtensionsRoute,
   legacySessionRoute,
   automationsRoute,
   workspaceExtensionsRoute,
+  workspacePortfolioRoute,
   workspaceSessionRoute,
   workspaceSettingsRoute,
 } from "./workspace-routes";
@@ -474,6 +476,7 @@ export function SessionRoute() {
   const local = useLocal();
   const automationsEnabled = isDesktopRuntime();
   const automationsRouteActive = automationsEnabled && automationsRouteRequested;
+  const portfolioRouteActive = /^\/workspace\/[^/]+\/portfolio$/.test(location.pathname);
   const denSettings = readDenSettings();
   const [automationsSupported, setAutomationsSupported] = useState(false);
   const [automationsNeedAttention, setAutomationsNeedAttention] = useState(false);
@@ -2645,10 +2648,10 @@ export function SessionRoute() {
           }}
         />
       }
-      primaryTitle={automationsRouteActive ? "Automations" : undefined}
-      primarySlot={automationsRouteActive ? (
-        <AutomationsPage providerCatalog={providerCatalog} />
-      ) : undefined}
+      primaryTitle={portfolioRouteActive ? "Portfolio" : automationsRouteActive ? "Automations" : undefined}
+      primarySlot={portfolioRouteActive && selectedWorkspaceEndpoint ? (
+        <PortfolioPage client={selectedWorkspaceEndpoint.client} workspaceId={selectedWorkspaceEndpoint.workspaceId} />
+      ) : automationsRouteActive ? <AutomationsPage providerCatalog={providerCatalog} /> : undefined}
       terminalOpen={terminalOpen}
       onTerminalOpenChange={setTerminalOpen}
       onSessionTabsChange={(tabs) => {
@@ -2666,6 +2669,8 @@ export function SessionRoute() {
         sidebarHydratedFromCache: Object.values(sessionsByWorkspaceId).some((list) => list.length > 0),
         startupPhase: effectiveLoading ? "nativeInit" : "ready",
         automationsActive: automationsRouteActive,
+        portfolioActive: portfolioRouteActive,
+        onOpenPortfolio: selectedWorkspaceId ? () => navigate(workspacePortfolioRoute(selectedWorkspaceId)) : undefined,
         automationsNeedAttention,
         onOpenAutomations: automationsNavigationAvailable
           ? () => {

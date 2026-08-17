@@ -109,7 +109,7 @@ function startFakeOpenWorkServer() {
         authorization: request.headers.get("authorization"),
         method: request.method,
       };
-      if (request.method === "POST") record.body = await request.json();
+      if (["POST", "PUT", "PATCH"].includes(request.method)) record.body = await request.json();
       requests.push(record);
 
       if (request.headers.get("authorization") !== "Bearer test-token") {
@@ -152,6 +152,14 @@ function startFakeOpenWorkServer() {
 
       if (url.pathname === "/workspaces") {
         return Response.json({ items: [workspaceOne, workspaceTwo], workspaces: [workspaceOne, workspaceTwo] });
+      }
+
+      if (url.pathname === "/workspace/ws_2/portfolio") {
+        if (request.method === "POST") return Response.json({ state: "ready", snapshot: { portfolio: { id: "por_1", name: "Studio" }, projects: [], relationships: [] } }, { status: 201 });
+        return Response.json({ state: "ready", snapshot: { portfolio: { id: "por_1", name: "Studio" }, projects: [], relationships: [] } });
+      }
+      if (url.pathname === "/workspace/ws_2/portfolio/projects" && request.method === "POST") {
+        return Response.json({ id: "prj_1", revision: 1, ...z.record(z.string(), z.unknown()).parse(record.body) }, { status: 201 });
       }
 
       if (url.pathname === "/workspace/ws_1/sessions") {
@@ -335,6 +343,7 @@ describe("OpenWorkExtensionsPreview session tools", () => {
 
     expect(contributions.map((contribution) => contribution.featureId)).toEqual([
       "sessions",
+      "portfolio",
       "automations",
       "extensions",
       "mcp:notion",
@@ -348,6 +357,24 @@ describe("OpenWorkExtensionsPreview session tools", () => {
     ).toEqual({
       kind: "tool",
       tool: "openwork-cloud_execute_capability",
+    });
+  });
+
+  test("inspects and creates Portfolio projects through the authenticated current workspace", async () => {
+    const fake = startFakeOpenWorkServer();
+    const plugin = await OpenWorkExtensionsPreview({ directory: "/tmp/archive" });
+
+    const inspected = JSON.parse(await plugin.tool.openwork_query.execute({ id: "portfolio.inspect" }));
+    expect(inspected).toMatchObject({ ok: true, id: "portfolio.inspect", result: { workspaceId: "ws_2", state: "ready" } });
+
+    const created = JSON.parse(await plugin.tool.openwork_execute.execute({
+      id: "portfolio.project.create",
+      args: { title: "Moon Harbor", kind: "series", vertical: "short-drama", lifecycleStage: "research" },
+    }, { sessionID: "ses_origin" }));
+    expect(created).toMatchObject({ ok: true, id: "portfolio.project.create", result: { workspaceId: "ws_2", project: { id: "prj_1", title: "Moon Harbor" } } });
+    expect(fake.requests.find((request) => request.pathname === "/workspace/ws_2/portfolio/projects" && request.method === "POST")).toMatchObject({
+      authorization: "Bearer test-token",
+      body: { title: "Moon Harbor", kind: "series", vertical: "short-drama", lifecycleStage: "research" },
     });
   });
 

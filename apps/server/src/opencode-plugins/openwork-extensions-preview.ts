@@ -80,6 +80,23 @@ const sessionCreateArgsSchema = z.object({
   workspaceId: z.string().trim().optional().describe("Optional OpenWork workspace id/name. Defaults to the workspace containing the current session."),
 });
 
+const portfolioWorkspaceArgsSchema = z.object({ workspaceId: z.string().trim().optional() });
+const portfolioInitializeArgsSchema = portfolioWorkspaceArgsSchema.extend({ name: z.string().trim().min(1), defaultVertical: z.string().trim().min(1).optional() });
+const portfolioProjectCreateArgsSchema = portfolioWorkspaceArgsSchema.extend({
+  title: z.string().trim().min(1), kind: z.string().trim().min(1), vertical: z.string().trim().min(1),
+  lifecycleStage: z.enum(["research", "planning", "creation", "review", "release", "publication", "promotion", "measurement", "archived"]),
+  parentProjectId: z.string().trim().min(1).optional(), idempotencyKey: z.string().trim().min(1).optional(),
+});
+const portfolioProjectUpdateArgsSchema = portfolioWorkspaceArgsSchema.extend({
+  projectId: z.string().trim().min(1), expectedRevision: z.number().int().positive(),
+  changes: z.object({ title: z.string().trim().min(1).optional(), kind: z.string().trim().min(1).optional(), vertical: z.string().trim().min(1).optional(), lifecycleStage: z.enum(["research", "planning", "creation", "review", "release", "publication", "promotion", "measurement", "archived"]).optional(), parentProjectId: z.string().trim().min(1).nullable().optional() }),
+});
+const portfolioRelationshipArgsSchema = portfolioWorkspaceArgsSchema.extend({ sourceProjectId: z.string().trim().min(1), targetProjectId: z.string().trim().min(1), type: z.enum(["adaptation-of", "derived-from", "promotion-for", "companion-to", "supersedes"]) });
+const portfolioSessionArgsSchema = portfolioWorkspaceArgsSchema.extend({ sessionId: z.string().trim().min(1) });
+const portfolioSessionSetArgsSchema = portfolioSessionArgsSchema.extend({ projectId: z.string().trim().min(1).optional() });
+const portfolioArtifactsListArgsSchema = portfolioWorkspaceArgsSchema.extend({ projectId: z.string().trim().min(1).optional(), sessionId: z.string().trim().min(1).optional() });
+const portfolioArtifactRegisterArgsSchema = portfolioArtifactsListArgsSchema.extend({ path: z.string().trim().min(1), role: z.string().trim().min(1) });
+
 const workspaceSchema = z.object({
   id: z.string(),
   name: z.string().optional(),
@@ -140,6 +157,7 @@ const OPENWORK_AGENT_SURFACE_INSTRUCTION =
 Use openwork_context when the request depends on the current OpenWork screen, open tabs, split view, focused pane, sidebar, side panel, settings panel, or available app actions.
 Each affordance declares its effects and executor. Use openwork_query only for side-effect-free affordances whose executor is OpenWork. Use openwork_execute for OpenWork commands without activating the desktop window. If executor names another tool, call that exact tool instead.
 Reading another session does not require opening it. Prefer session.search then session.read for transcript questions; use session.create for new chats and a UI command only when the user asks to navigate.
+Use the portfolio.* affordances to inspect or initialize the current workspace Portfolio, manage projects and relationships, associate sessions, and register or list artifacts. Keep Portfolio metadata synchronized when the user asks to create, organize, publish, promote, or track durable project work.
 To open settings or navigate the app, use openwork_execute with ids from openwork_context such as settings.panel.open — never browser_* tools for the OpenWork app itself.`;
 
 const OPENWORK_BROWSER_INSTRUCTION =
@@ -430,7 +448,7 @@ async function readOpenworkAgentContext(
   };
 }
 
-async function queryOpenworkAffordance(rawArgs: unknown): Promise<unknown> {
+async function queryOpenworkAffordance(rawArgs: unknown, context: OpenCodeContext): Promise<unknown> {
   const request = openworkAffordanceRequestSchema.parse(rawArgs);
   if (request.id === "session.search") {
     return affordanceResult(
@@ -445,6 +463,9 @@ async function queryOpenworkAffordance(rawArgs: unknown): Promise<unknown> {
       await readOpenWorkSession(request.args ?? {}),
       affordanceReadEffects,
     );
+  }
+  if (request.id === "portfolio.inspect" || request.id === "portfolio.session.get" || request.id === "portfolio.artifacts.list") {
+    return affordanceResult(request.id, await queryPortfolio(request.id, request.args ?? {}, context), affordanceReadEffects);
   }
   if (request.id === "extension.actions") {
     const args = listActionsArgsSchema.parse(request.args ?? {});
@@ -481,6 +502,9 @@ async function executeOpenworkAffordance(
       await createOpenWorkSessions(request.args ?? {}, context),
       affordanceWriteEffects,
     );
+  }
+  if (request.id.startsWith("portfolio.")) {
+    return affordanceResult(request.id, await executePortfolio(request.id, request.args ?? {}, context), affordanceWriteEffects);
   }
   if (request.id === "automation.propose") {
     return affordanceResult(
@@ -868,6 +892,72 @@ async function createOpenWorkSessions(rawArgs: unknown, context: OpenCodeContext
   };
 }
 
+async function portfolioWorkspace(workspaceId: string | undefined, context: OpenCodeContext) {
+  return resolveContextWorkspace(workspaceId, context);
+}
+
+function portfolioPath(workspaceId: string, suffix = "") {
+  return `/workspace/${encodeURIComponent(workspaceId)}/portfolio${suffix}`;
+}
+
+async function queryPortfolio(id: string, rawArgs: unknown, context: OpenCodeContext): Promise<object> {
+  if (id === "portfolio.inspect") {
+    const args = portfolioWorkspaceArgsSchema.parse(rawArgs);
+    const workspace = await portfolioWorkspace(args.workspaceId, context);
+    const result = await serverGet(portfolioPath(workspace.id));
+    return { workspaceId: workspace.id, workspace: workspaceLabel(workspace), ...isRecord(result) ? result : { result } };
+  }
+  if (id === "portfolio.session.get") {
+    const args = portfolioSessionArgsSchema.parse(rawArgs);
+    const workspace = await portfolioWorkspace(args.workspaceId, context);
+    const result = await serverGet(portfolioPath(workspace.id, `/sessions/${encodeURIComponent(args.sessionId)}`));
+    return { workspaceId: workspace.id, workspace: workspaceLabel(workspace), ...isRecord(result) ? result : { result } };
+  }
+  const args = portfolioArtifactsListArgsSchema.parse(rawArgs);
+  const workspace = await portfolioWorkspace(args.workspaceId, context);
+  const query = new URLSearchParams();
+  if (args.projectId) query.set("projectId", args.projectId);
+  if (args.sessionId) query.set("sessionId", args.sessionId);
+  const suffix = query.size ? `?${query.toString()}` : "";
+  const result = await serverGet(portfolioPath(workspace.id, `/artifacts${suffix}`));
+  return { workspaceId: workspace.id, workspace: workspaceLabel(workspace), ...isRecord(result) ? result : { result } };
+}
+
+async function executePortfolio(id: string, rawArgs: unknown, context: OpenCodeContext): Promise<object> {
+  if (id === "portfolio.initialize") {
+    const { workspaceId, ...body } = portfolioInitializeArgsSchema.parse(rawArgs);
+    const workspace = await portfolioWorkspace(workspaceId, context);
+    return { workspaceId: workspace.id, workspace: workspaceLabel(workspace), portfolio: await serverJson("POST", portfolioPath(workspace.id), body) };
+  }
+  if (id === "portfolio.project.create") {
+    const { workspaceId, idempotencyKey, ...input } = portfolioProjectCreateArgsSchema.parse(rawArgs);
+    const workspace = await portfolioWorkspace(workspaceId, context);
+    const body = { ...input, idempotencyKey: idempotencyKey ?? globalThis.crypto.randomUUID() };
+    return { workspaceId: workspace.id, workspace: workspaceLabel(workspace), project: await serverJson("POST", portfolioPath(workspace.id, "/projects"), body) };
+  }
+  if (id === "portfolio.project.update") {
+    const { workspaceId, projectId, expectedRevision, changes } = portfolioProjectUpdateArgsSchema.parse(rawArgs);
+    const workspace = await portfolioWorkspace(workspaceId, context);
+    return { workspaceId: workspace.id, workspace: workspaceLabel(workspace), project: await serverJson("PATCH", portfolioPath(workspace.id, `/projects/${encodeURIComponent(projectId)}`), { expectedRevision, ...changes }) };
+  }
+  if (id === "portfolio.relationship.create") {
+    const { workspaceId, ...body } = portfolioRelationshipArgsSchema.parse(rawArgs);
+    const workspace = await portfolioWorkspace(workspaceId, context);
+    return { workspaceId: workspace.id, workspace: workspaceLabel(workspace), relationship: await serverJson("POST", portfolioPath(workspace.id, "/relationships"), body) };
+  }
+  if (id === "portfolio.session.set") {
+    const { workspaceId, sessionId, projectId } = portfolioSessionSetArgsSchema.parse(rawArgs);
+    const workspace = await portfolioWorkspace(workspaceId, context);
+    return { workspaceId: workspace.id, workspace: workspaceLabel(workspace), context: await serverJson("PUT", portfolioPath(workspace.id, `/sessions/${encodeURIComponent(sessionId)}`), { projectId }) };
+  }
+  if (id === "portfolio.artifact.register") {
+    const { workspaceId, ...body } = portfolioArtifactRegisterArgsSchema.parse(rawArgs);
+    const workspace = await portfolioWorkspace(workspaceId, context);
+    return { workspaceId: workspace.id, workspace: workspaceLabel(workspace), artifact: await serverJson("POST", portfolioPath(workspace.id, "/artifacts"), body) };
+  }
+  throw new Error(`Unsupported Portfolio command: ${id}`);
+}
+
 /**
  * Validates a proposed Automation and hands it back for the renderer to show.
  *
@@ -887,9 +977,13 @@ function proposeAutomation(rawArgs: unknown): object {
 }
 
 async function postJson(path: string, body: ExtensionActionPayload | Record<string, unknown>): Promise<unknown> {
+  return serverJson("POST", path, body);
+}
+
+async function serverJson(method: "POST" | "PUT" | "PATCH", path: string, body: Record<string, unknown>): Promise<unknown> {
   const { url, token } = requireOpenWorkServer();
   const response = await fetch(url + path, {
-    method: "POST",
+    method,
     headers: {
       Authorization: `Bearer ${token}`,
       "Content-Type": "application/json",
@@ -958,7 +1052,7 @@ export const OpenWorkExtensionsPreview = async (factoryInput?: unknown) => {
   },
   tool: {
     openwork_context: {
-      description: "Read one semantic snapshot of OpenWork: current screen, retained conversation tabs, split view and focused pane, sidebar and side panel state, settings panel, provider contributions, remote skill guidance, and available affordances with explicit effects and executors.",
+      description: "Read one semantic snapshot of OpenWork: current screen, retained conversation tabs, Portfolio operations, split view and focused pane, sidebar and side panel state, settings panel, provider contributions, remote skill guidance, and available affordances with explicit effects and executors.",
       args: {},
       async execute() {
         return JSON.stringify(
@@ -971,8 +1065,9 @@ export const OpenWorkExtensionsPreview = async (factoryInput?: unknown) => {
     openwork_query: {
       description: "Run a side-effect-free OpenWork affordance whose executor is OpenWork. Use the exact id and arguments from openwork_context. This reads backend or app state without navigation or window focus.",
       args: openworkAffordanceRequestSchema.shape,
-      async execute(rawArgs: unknown) {
-        return JSON.stringify(await queryOpenworkAffordance(rawArgs), null, 2);
+      async execute(rawArgs: unknown, context?: OpenCodeContext) {
+        const mergedContext = { ...factoryContext, ...normalizeOpenCodeContext(context) };
+        return JSON.stringify(await queryOpenworkAffordance(rawArgs, mergedContext), null, 2);
       },
     },
     openwork_execute: {

@@ -117,6 +117,27 @@ function sessionContribution(): OpenworkFeatureContribution {
   };
 }
 
+function portfolioContribution(): OpenworkFeatureContribution {
+  const provider: OpenworkProviderRef = { id: "openwork-portfolio", kind: "builtin" };
+  const workspace = argument("workspaceId", "string", false, "Workspace id or name. Defaults to the current workspace.");
+  return {
+    featureId: "portfolio",
+    provider,
+    affordances: [
+      affordance({ id: "portfolio.inspect", kind: "query", title: "Inspect Portfolio", description: "Read the Portfolio, projects, and relationships for a workspace.", provider, arguments: [workspace], effects: readEffects }),
+      affordance({ id: "portfolio.initialize", kind: "command", title: "Initialize Portfolio", description: "Create the workspace Portfolio when it does not exist.", provider, arguments: [argument("name", "string", true, "Portfolio name."), argument("defaultVertical", "string", false, "Optional default vertical."), workspace], effects: writeEffects }),
+      affordance({ id: "portfolio.project.create", kind: "command", title: "Create Portfolio project", description: "Create a top-level or child project in the Portfolio.", provider, arguments: [argument("title", "string", true, "Project title."), argument("kind", "string", true, "Generic kind such as book, series, album, video, or campaign."), argument("vertical", "string", true, "Vertical such as publishing, music, video, or short-drama."), argument("lifecycleStage", "string", true, "Lifecycle stage."), argument("parentProjectId", "string", false, "Optional parent project id."), argument("idempotencyKey", "string", false, "Optional stable retry key."), workspace], effects: writeEffects }),
+      affordance({ id: "portfolio.project.update", kind: "command", title: "Update Portfolio project", description: "Update project metadata, hierarchy, or lifecycle using its current revision.", provider, arguments: [argument("projectId", "string", true, "Project id."), argument("expectedRevision", "number", true, "Current project revision."), argument("changes", "object", true, "Fields to update: title, kind, vertical, lifecycleStage, or parentProjectId."), workspace], effects: writeEffects }),
+      affordance({ id: "portfolio.relationship.create", kind: "command", title: "Relate Portfolio projects", description: "Create a typed relationship between two projects.", provider, arguments: [argument("sourceProjectId", "string", true, "Source project id."), argument("targetProjectId", "string", true, "Target project id."), argument("type", "string", true, "Relationship type."), workspace], effects: writeEffects }),
+      affordance({ id: "portfolio.session.get", kind: "query", title: "Read session Portfolio context", description: "Read the project associated with a session.", provider, arguments: [argument("sessionId", "string", true, "Session id."), workspace], effects: readEffects }),
+      affordance({ id: "portfolio.session.set", kind: "command", title: "Set session Portfolio context", description: "Associate a session with the Portfolio or a project.", provider, arguments: [argument("sessionId", "string", true, "Session id."), argument("projectId", "string", false, "Optional project id; omit for Portfolio-level context."), workspace], effects: writeEffects }),
+      affordance({ id: "portfolio.artifacts.list", kind: "query", title: "List Portfolio artifacts", description: "List registered artifacts, optionally filtered by project or session.", provider, arguments: [argument("projectId", "string", false, "Optional project id."), argument("sessionId", "string", false, "Optional session id."), workspace], effects: readEffects }),
+      affordance({ id: "portfolio.artifact.register", kind: "command", title: "Register Portfolio artifact", description: "Register a workspace-relative artifact produced by the agent.", provider, arguments: [argument("path", "string", true, "Workspace-relative artifact path."), argument("role", "string", true, "Artifact role."), argument("projectId", "string", false, "Optional project id."), argument("sessionId", "string", false, "Optional session id."), workspace], effects: writeEffects }),
+    ],
+    guidance: [],
+  };
+}
+
 function automationContribution(): OpenworkFeatureContribution {
   const provider: OpenworkProviderRef = { id: "openwork-automations", kind: "builtin" };
   return {
@@ -244,6 +265,7 @@ export function buildOpenworkProviderContributions(
   const connect = connectContribution(skills, cloudMcp);
   return [
     sessionContribution(),
+    portfolioContribution(),
     automationContribution(),
     extensionContribution(),
     ...mcps

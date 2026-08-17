@@ -9,8 +9,20 @@ describe("OpenWork provider adapters", () => {
 
     expect(contributions.map((contribution) => contribution.featureId)).toEqual([
       "sessions",
+      "portfolio",
       "automations",
       "extensions",
+    ]);
+    expect(contributions.find((contribution) => contribution.featureId === "portfolio")?.affordances.map((affordance) => affordance.id)).toEqual([
+      "portfolio.inspect",
+      "portfolio.initialize",
+      "portfolio.project.create",
+      "portfolio.project.update",
+      "portfolio.relationship.create",
+      "portfolio.session.get",
+      "portfolio.session.set",
+      "portfolio.artifacts.list",
+      "portfolio.artifact.register",
     ]);
     expect(
       contributions.flatMap((contribution) => contribution.affordances)
@@ -68,16 +80,17 @@ describe("OpenWork provider adapters", () => {
 
     expect(contributions.map((contribution) => contribution.featureId)).toEqual([
       "sessions",
+      "portfolio",
       "automations",
       "extensions",
       "mcp:notion",
       "connect",
     ]);
-    expect(contributions[3]).toMatchObject({
+    expect(contributions[4]).toMatchObject({
       provider: { id: "notion", kind: "mcp" },
       affordances: [],
     });
-    expect(contributions[4]?.affordances.map((affordance) => affordance.id)).toEqual([
+    expect(contributions[5]?.affordances.map((affordance) => affordance.id)).toEqual([
       "connect.capabilities.search",
       "connect.capability.execute",
     ]);

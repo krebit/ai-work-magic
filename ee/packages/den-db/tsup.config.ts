@@ -18,7 +18,9 @@ export default defineConfig({
   },
   format: ["esm"],
   dts: true,
-  clean: true,
+  // Keep the runtime entrypoints available while a local Den watcher rebuilds
+  // this shared workspace package.
+  clean: false,
   target: "es2022",
   platform: "node",
   sourcemap: false,

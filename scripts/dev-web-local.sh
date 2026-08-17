@@ -9,6 +9,7 @@ PROJECT_NAME="openwork-web-local"
 # These are only used when not already set in the environment or .env.
 : "${DATABASE_URL:=mysql://root:password@127.0.0.1:3306/openwork_den}"
 : "${BETTER_AUTH_SECRET:=local-dev-secret-not-for-production-use!!}"
+: "${DEN_ORG_MODE:=multi_org}"
 
 pick_port() {
   node <<'EOF'
@@ -86,7 +87,7 @@ DEN_WEB_PORT="$(choose_port "${DEN_LOCAL_WEB_PORT:-3005}")"
 DEN_WEB_ORIGIN="http://localhost:${DEN_WEB_PORT}"
 
 : "${BETTER_AUTH_URL:=$DEN_WEB_ORIGIN}"
-export DATABASE_URL BETTER_AUTH_SECRET BETTER_AUTH_URL
+export DATABASE_URL BETTER_AUTH_SECRET BETTER_AUTH_URL DEN_ORG_MODE
 
 echo "Starting local MySQL..."
 docker compose -p "$PROJECT_NAME" -f "$COMPOSE_FILE" down -v >/dev/null 2>&1 || true
@@ -108,6 +109,7 @@ echo "Den web:        $DEN_WEB_ORIGIN"
   cd "$ROOT_DIR/ee/apps/den-controller"
   env \
     OPENWORK_DEV_MODE=1 \
+    DEN_ORG_MODE="$DEN_ORG_MODE" \
     DATABASE_URL="$DATABASE_URL" \
     BETTER_AUTH_SECRET="$BETTER_AUTH_SECRET" \
     BETTER_AUTH_URL="$BETTER_AUTH_URL" \

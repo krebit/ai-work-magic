@@ -1,5 +1,5 @@
 import { createServer, type IncomingHttpHeaders } from "node:http"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it } from "bun:test"
 import {
   AmmClientError,
   AmmResearchClient,
@@ -54,7 +54,11 @@ afterEach(async () => {
   await Promise.all(servers.splice(0).map((server) => server.close()))
 })
 
-async function startServer(respond: (request: CapturedRequest) => { body?: unknown; delayMs?: number; status?: number }): Promise<TestServer> {
+async function startServer(respond: (request: CapturedRequest) => {
+  body?: unknown
+  delayMs?: number
+  status?: number
+}): Promise<TestServer> {
   const requests: CapturedRequest[] = []
   const server = createServer(async (request, response) => {
     let text = ""
@@ -69,6 +73,7 @@ async function startServer(respond: (request: CapturedRequest) => { body?: unkno
     const result = respond(captured)
     setTimeout(() => {
       response.writeHead(result.status ?? 200, { "content-type": "application/json" })
+      response.flushHeaders()
       response.end(JSON.stringify(result.body ?? runResponse))
     }, result.delayMs ?? 0)
   })
@@ -93,19 +98,20 @@ function clientFor(baseUrl: string, options: Partial<AmmResearchClientConfig> = 
   })
 }
 
-function expectAmmError(error: unknown, code: AmmClientError["code"]) {
+function expectAmmError(error: unknown, code: AmmClientError["code"], secret = config.serviceKey) {
   expect(error).toBeInstanceOf(AmmClientError)
   if (!(error instanceof AmmClientError)) throw new Error("Expected AmmClientError")
   expect(error.code).toBe(code)
-  expect(error.message).not.toContain(config.serviceKey)
-  expect(JSON.stringify(error)).not.toContain(config.serviceKey)
+  expect(error.message).not.toContain(secret)
+  expect(error.toString()).not.toContain(secret)
+  expect(JSON.stringify(error)).not.toContain(secret)
 }
 
-async function expectAmmRejection(promise: Promise<unknown>, code: AmmClientError["code"]) {
+async function expectAmmRejection(promise: Promise<unknown>, code: AmmClientError["code"], secret?: string) {
   try {
     await promise
   } catch (error) {
-    expectAmmError(error, code)
+    expectAmmError(error, code, secret)
     return
   }
   throw new Error(`Expected ${code} rejection`)
@@ -115,7 +121,10 @@ describe("AmmResearchClient", () => {
   it("sends only the service authorization and public collection body downstream", async () => {
     const server = await startServer(() => ({ body: runResponse }))
 
-    const result = await clientFor(server.baseUrl).startCollection(collectionInput, { requestId: "req_test" })
+    const result = await clientFor(server.baseUrl).startCollection(collectionInput, {
+      idempotencyKey: "denop_globally_unique_test",
+      requestId: "req_test",
+    })
 
     expect(result).toEqual(runResponse)
     expect(server.requests).toHaveLength(1)
@@ -123,11 +132,12 @@ describe("AmmResearchClient", () => {
     expect(captured.method).toBe("POST")
     expect(captured.url).toBe("/api/v1/kdp/keyword-collections")
     expect(captured.headers.authorization).toBe("Bearer service-test-key")
-    expect(captured.headers["idempotency-key"]).toBe("ammop_test")
+    expect(captured.headers["idempotency-key"]).toBe("denop_globally_unique_test")
     expect(captured.headers["x-request-id"]).toBe("req_test")
     expect(captured.headers["x-den-organization-id"]).toBeUndefined()
     expect(captured.headers["x-den-member-id"]).toBeUndefined()
     expect(captured.body).not.toHaveProperty("organizationId")
+    expect(captured.body).toHaveProperty("queries.0.candidateId", "ammop_test")
   })
 
   it("uses the documented AMM paths for run, observations, and scoring calls", async () => {
@@ -166,7 +176,10 @@ describe("AmmResearchClient", () => {
       const server = await startServer(() => ({ status, body: { detail: `Bearer ${config.serviceKey}` } }))
 
       await expectAmmRejection(
-        clientFor(server.baseUrl).startCollection(collectionInput, { requestId: "req_test" }),
+        clientFor(server.baseUrl).startCollection(collectionInput, {
+          idempotencyKey: "denop_globally_unique_test",
+          requestId: "req_test",
+        }),
         code,
       )
     }
@@ -176,7 +189,10 @@ describe("AmmResearchClient", () => {
     const server = await startServer(() => ({ body: { runId: "run_test" } }))
 
     await expectAmmRejection(
-      clientFor(server.baseUrl).startCollection(collectionInput, { requestId: "req_test" }),
+      clientFor(server.baseUrl).startCollection(collectionInput, {
+        idempotencyKey: "denop_globally_unique_test",
+        requestId: "req_test",
+      }),
       "amm_invalid_response",
     )
   })
@@ -185,14 +201,57 @@ describe("AmmResearchClient", () => {
     const server = await startServer(() => ({ body: runResponse, delayMs: 100 }))
 
     await expectAmmRejection(
-      clientFor(server.baseUrl, { timeoutMs: 5 }).startCollection(collectionInput, { requestId: "req_test" }),
+      clientFor(server.baseUrl, { timeoutMs: 5 }).startCollection(collectionInput, {
+        idempotencyKey: "denop_globally_unique_test",
+        requestId: "req_test",
+      }),
       "amm_timeout",
+    )
+  })
+
+  it("maps a response body that stalls after headers to a safe timeout error", async () => {
+    const client = new AmmResearchClient({
+      config: { ...config, timeoutMs: 5 },
+      fetchImpl: async (_input, init) => {
+        const signal = init?.signal
+        const body = new ReadableStream({
+          start(controller) {
+            signal?.addEventListener("abort", () => controller.error(signal.reason), { once: true })
+          },
+        })
+        return new Response(body, { headers: { "content-type": "application/json" } })
+      },
+    })
+
+    await expectAmmRejection(
+      client.startCollection(collectionInput, {
+        idempotencyKey: "denop_globally_unique_test",
+        requestId: "req_test",
+      }),
+      "amm_timeout",
+    )
+  })
+
+  it("sanitizes malformed service credentials before a request can expose them", async () => {
+    const malformedSecret = "service-test-key\ninvalid-header"
+    const client = clientFor("http://127.0.0.1:1", { serviceKey: malformedSecret })
+
+    await expectAmmRejection(
+      client.startCollection(collectionInput, {
+        idempotencyKey: "denop_globally_unique_test",
+        requestId: "req_test",
+      }),
+      "amm_request_failed",
+      malformedSecret,
     )
   })
 
   it("reports missing AMM configuration only when an AMM call is attempted", async () => {
     const client = new AmmResearchClient({ config: null, fetchImpl: fetch })
 
-    await expectAmmRejection(client.startCollection(collectionInput, { requestId: "req_test" }), "amm_not_configured")
+    await expectAmmRejection(client.startCollection(collectionInput, {
+      idempotencyKey: "denop_globally_unique_test",
+      requestId: "req_test",
+    }), "amm_not_configured")
   })
 })

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest"
+import { describe, expect, it } from "bun:test"
 import { startAmmKdpKeywordCollectionSchema, toAmmCollectionBody, type StartAmmKdpKeywordCollection } from "./contracts.js"
 
 const liveRequest: StartAmmKdpKeywordCollection = {

@@ -20,6 +20,10 @@ export type AmmRequestContext = {
   requestId: string
 }
 
+export type AmmStartCollectionContext = AmmRequestContext & {
+  idempotencyKey: string
+}
+
 export type AmmClientErrorCode =
   | "amm_not_configured"
   | "amm_unauthorized"
@@ -51,6 +55,10 @@ function isTimeout(error: unknown) {
   return error instanceof DOMException && (error.name === "AbortError" || error.name === "TimeoutError")
 }
 
+function isHeaderValueSafe(value: string) {
+  return !/[\u0000-\u001F\u007F]/.test(value)
+}
+
 function errorForStatus(status: number): AmmClientError {
   if (status === 401 || status === 403) return new AmmClientError("amm_unauthorized", status)
   if (status === 409) return new AmmClientError("amm_idempotency_conflict", status)
@@ -80,11 +88,11 @@ export class AmmResearchClient {
     this.fetchImpl = options.fetchImpl ?? fetch
   }
 
-  async startCollection(input: StartAmmKdpKeywordCollection, context: AmmRequestContext) {
+  async startCollection(input: StartAmmKdpKeywordCollection, context: AmmStartCollectionContext) {
     const collection = startAmmKdpKeywordCollectionSchema.parse(input)
     const response = await this.request("/api/v1/kdp/keyword-collections", {
       body: toAmmCollectionBody(collection),
-      idempotencyKey: collection.operationKey,
+      idempotencyKey: context.idempotencyKey,
       method: "POST",
       requestId: context.requestId,
     })
@@ -140,22 +148,29 @@ export class AmmResearchClient {
     requestId: string
   }): Promise<unknown> {
     if (!this.config) throw new AmmClientError("amm_not_configured")
+    if (!isHeaderValueSafe(this.config.serviceKey)) throw new AmmClientError("amm_request_failed")
 
-    const headers = new Headers({
-      accept: "application/json",
-      authorization: `Bearer ${this.config.serviceKey}`,
-      "x-request-id": input.requestId,
-    })
-    if (input.idempotencyKey) headers.set("idempotency-key", input.idempotencyKey)
-    if (input.body !== undefined) headers.set("content-type", "application/json")
+    let headers: Headers
+    try {
+      headers = new Headers({
+        accept: "application/json",
+        authorization: `Bearer ${this.config.serviceKey}`,
+        "x-request-id": input.requestId,
+      })
+      if (input.idempotencyKey) headers.set("idempotency-key", input.idempotencyKey)
+      if (input.body !== undefined) headers.set("content-type", "application/json")
+    } catch {
+      throw new AmmClientError("amm_request_failed")
+    }
 
+    const signal = AbortSignal.timeout(requestTimeout(this.config.timeoutMs))
     let response: Response
     try {
       response = await this.fetchImpl(`${this.config.baseUrl.replace(/\/+$/, "")}${path}`, {
         body: input.body === undefined ? undefined : JSON.stringify(input.body),
         headers,
         method: input.method,
-        signal: AbortSignal.timeout(requestTimeout(this.config.timeoutMs)),
+        signal,
       })
     } catch (error) {
       if (isTimeout(error)) throw new AmmClientError("amm_timeout")
@@ -166,7 +181,8 @@ export class AmmResearchClient {
 
     try {
       return await response.json()
-    } catch {
+    } catch (error) {
+      if (signal.aborted || isTimeout(error)) throw new AmmClientError("amm_timeout")
       throw new AmmClientError("amm_invalid_response", response.status)
     }
   }

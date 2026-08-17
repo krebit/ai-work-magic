@@ -8,6 +8,10 @@ import { z } from "zod"
 
 export const DEFAULT_DEN_DIAGNOSTICS_ORIGIN = "https://diagnostic.openworklabs.com"
 
+function emptyStringToUndefined(value: unknown) {
+  return typeof value === "string" && !value.trim() ? undefined : value
+}
+
 const EnvSchema = z.object({
   DATABASE_URL: z.string().min(1).optional(),
   DATABASE_HOST: z.string().min(1).optional(),
@@ -65,8 +69,8 @@ const EnvSchema = z.object({
   DEN_DIAGNOSTICS_BEARER_TOKEN: z.string().optional(),
   DEN_GATEWAY_KEY: z.string().optional(),
   DEN_GATEWAY_ORIGIN: z.string().optional(),
-  AMM_API_BASE_URL: z.string().url().optional(),
-  DEN_TO_AMM_SERVICE_KEY: z.string().min(32).optional(),
+  AMM_API_BASE_URL: z.preprocess(emptyStringToUndefined, z.string().url().optional()),
+  DEN_TO_AMM_SERVICE_KEY: z.preprocess(emptyStringToUndefined, z.string().min(32).optional()),
   AMM_REQUEST_TIMEOUT_MS: z.string().optional(),
   DEN_GOOGLE_OAUTH_AUTHORIZE_URL: z.string().optional(),
   DEN_GOOGLE_OAUTH_TOKEN_URL: z.string().optional(),

@@ -5,6 +5,7 @@ describe("Portfolio sidebar navigation", () => {
   test("uses the sidebar workspace on legacy session routes", () => {
     expect(portfolioNavigationWorkspaceId("", "ws_active")).toBe("ws_active");
     expect(portfolioNavigationWorkspaceId("ws_route", "ws_active")).toBe("ws_route");
+    expect(portfolioNavigationWorkspaceId("", "", "ws_visible")).toBe("ws_visible");
     expect(portfolioNavigationWorkspaceId("", "")).toBeNull();
   });
 });

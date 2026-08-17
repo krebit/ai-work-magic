@@ -1235,7 +1235,11 @@ export function SessionRoute() {
   }, [navigate, selectedSessionId, sidebarActiveWorkspaceId]);
 
   const extensionsMainOpen = /^\/(?:workspace\/[^/]+\/)?extensions(?:\/|$)/.test(location.pathname);
-  const portfolioWorkspaceId = portfolioNavigationWorkspaceId(selectedWorkspaceId, sidebarActiveWorkspaceId);
+  const portfolioWorkspaceId = portfolioNavigationWorkspaceId(
+    selectedWorkspaceId,
+    sidebarActiveWorkspaceId,
+    workspaceSessionGroups[0]?.workspace.id,
+  );
 
   const surfaceProps = useMemo(() => {
     if (!client || !selectedWorkspaceId || !selectedSessionId || !opencodeBaseUrl || !token || !opencodeClient) {

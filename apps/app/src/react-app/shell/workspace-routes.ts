@@ -15,8 +15,9 @@ export function workspacePortfolioRoute(workspaceId: string) {
 export function portfolioNavigationWorkspaceId(
   routeWorkspaceId?: string | null,
   sidebarWorkspaceId?: string | null,
+  visibleWorkspaceId?: string | null,
 ) {
-  return routeWorkspaceId?.trim() || sidebarWorkspaceId?.trim() || null;
+  return routeWorkspaceId?.trim() || sidebarWorkspaceId?.trim() || visibleWorkspaceId?.trim() || null;
 }
 
 export function workspaceSettingsRoute(

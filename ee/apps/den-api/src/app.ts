@@ -11,7 +11,7 @@ import { describeRoute, openAPIRouteHandler, resolver } from "hono-openapi"
 import { z } from "zod"
 import { db } from "./db.js"
 import { env } from "./env.js"
-import { publicRoute } from "./middleware/index.js"
+import { orgMemberRoute, publicRoute } from "./middleware/index.js"
 import { registerAdminMcpRoutes } from "./mcp/admin.js"
 import { registerAgentMcpRoutes } from "./mcp/agent.js"
 import { registerExternalConnectionProxyRoutes } from "./mcp/external-connection-proxy.js"
@@ -208,7 +208,7 @@ app.get(
 )
 
 registerAdminRoutes(app)
-registerAmmRoutes(app)
+registerAmmRoutes(app, { memberRoute: orgMemberRoute() })
 registerAuthRoutes(app)
 registerBootstrapRoutes(app)
 registerCloudRoutes(app)

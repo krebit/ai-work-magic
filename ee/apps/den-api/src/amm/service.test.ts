@@ -241,6 +241,69 @@ describe("AMM operation ownership and usage", () => {
     expect(store.buckets.get(bucket.id)?.reservedUnits).toBe(4)
   })
 
+  it("atomically interlocks an in-flight start from reservation release", async () => {
+    const { bucket, service, store } = serviceWithBucket()
+    const operation = await service.reserveAmmOperation(reservation())
+
+    const claimed = await service.beginAmmOperationStart({
+      organizationId: organizationA,
+      operationId: operation.id,
+    })
+    const pendingCancellation = await service.prepareAmmOperationCancellation({
+      organizationId: organizationA,
+      operationId: operation.id,
+    })
+    const directCancelError = await captureAmmError(service.cancelOwnedAmmOperation({
+      organizationId: organizationA,
+      operationId: operation.id,
+    }))
+
+    expect(claimed?.state).toBe("running")
+    expect(claimed?.ammRunId).toBe(null)
+    expect(pendingCancellation?.kind).toBe("start_pending")
+    expect(directCancelError.code).toBe("amm_operation_state_conflict")
+    expect(store.buckets.get(bucket.id)?.reservedUnits).toBe(4)
+
+    await service.attachAmmRun({
+      organizationId: organizationA,
+      operationId: operation.id,
+      ammRunId: "run_interlocked",
+    })
+    const attachedCancellation = await service.prepareAmmOperationCancellation({
+      organizationId: organizationA,
+      operationId: operation.id,
+    })
+    expect(attachedCancellation?.kind).toBe("run_attached")
+    expect(attachedCancellation?.operation.ammRunId).toBe("run_interlocked")
+
+    const cancelled = await service.cancelOwnedAmmOperation({
+      organizationId: organizationA,
+      operationId: operation.id,
+    })
+    expect(cancelled?.state).toBe("cancelled")
+    expect(store.buckets.get(bucket.id)?.reservedUnits).toBe(0)
+  })
+
+  it("rejects same-key start recovery after cancellation released the reservation", async () => {
+    const { bucket, service, store } = serviceWithBucket()
+    const operation = await service.reserveAmmOperation(reservation())
+    await service.cancelOwnedAmmOperation({
+      organizationId: organizationA,
+      operationId: operation.id,
+    })
+
+    const reserveError = await captureAmmError(service.reserveAmmOperation(reservation()))
+    const beginError = await captureAmmError(service.beginAmmOperationStart({
+      organizationId: organizationA,
+      operationId: operation.id,
+    }))
+
+    expect(reserveError.code).toBe("amm_operation_state_conflict")
+    expect(beginError.code).toBe("amm_operation_state_conflict")
+    expect(store.operations.size).toBe(1)
+    expect(store.buckets.get(bucket.id)?.reservedUnits).toBe(0)
+  })
+
   it("returns a conflict for the same key with a different digest", async () => {
     const { bucket, service, store } = serviceWithBucket()
     await service.reserveAmmOperation(reservation())
@@ -289,6 +352,10 @@ describe("AMM operation ownership and usage", () => {
   it("reconciliation is idempotent and never charges more than reserved units", async () => {
     const { bucket, service, store } = serviceWithBucket()
     const operation = await service.reserveAmmOperation(reservation({ maximumUnits: 5 }))
+    await service.beginAmmOperationStart({
+      organizationId: organizationA,
+      operationId: operation.id,
+    })
     await service.attachAmmRun({
       organizationId: organizationA,
       operationId: operation.id,
@@ -363,6 +430,10 @@ describe("AMM operation ownership and usage", () => {
       operationId: operation.id,
       ammRunId: "run_hidden",
     })).toBe(null)
+    await service.beginAmmOperationStart({
+      organizationId: organizationA,
+      operationId: operation.id,
+    })
     const attached = await service.attachAmmRun({
       organizationId: organizationA,
       operationId: operation.id,

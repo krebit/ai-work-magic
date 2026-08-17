@@ -1,7 +1,9 @@
 import { describe, expect, it } from "bun:test"
 import {
   ammProviderUsageSchema,
+  ammRunCancellationAcknowledgementSchema,
   ammRunAcknowledgementSchema,
+  scoreAmmKdpKeywordsSchema,
   startAmmKdpKeywordCollectionSchema,
   toAmmCollectionBody,
   type StartAmmKdpKeywordCollection,
@@ -90,7 +92,7 @@ describe("AMM Den contracts", () => {
     expectNoProhibitedIdentityFields(body)
   })
 
-  it("accepts the strict live start/cancel acknowledgement without a result", () => {
+  it("accepts the strict live start acknowledgement without a result", () => {
     expect(ammRunAcknowledgementSchema.parse({
       runId: "0198b5f0-7b80-7000-8000-000000000001",
       operation: "kdp.keyword-collection",
@@ -102,6 +104,19 @@ describe("AMM Den contracts", () => {
       state: "queued",
       requestId: "req_contract_test",
     })
+  })
+
+  it("accepts only cancelled strict cancellation acknowledgements", () => {
+    const acknowledgement = {
+      runId: "0198b5f0-7b80-7000-8000-000000000001",
+      operation: "kdp.keyword-collection",
+      state: "cancelled",
+      requestId: "req_contract_test",
+    }
+
+    expect(ammRunCancellationAcknowledgementSchema.parse(acknowledgement)).toEqual(acknowledgement)
+    expect(ammRunCancellationAcknowledgementSchema.safeParse({ ...acknowledgement, state: "running" }).success).toBe(false)
+    expect(ammRunCancellationAcknowledgementSchema.safeParse({ ...acknowledgement, state: "succeeded" }).success).toBe(false)
   })
 
   it.each(prohibitedIdentityFields)("rejects the acknowledgement %s identity field", (field) => {
@@ -130,6 +145,16 @@ describe("AMM Den contracts", () => {
       capabilityUnits: 1,
       providerCalls: 1,
       upstreamCostUsd: "1.123456789",
+    }).success).toBe(false)
+  })
+
+  it("rejects duplicate scoring candidate IDs", () => {
+    expect(scoreAmmKdpKeywordsSchema.safeParse({
+      schemaVersion: "amm.kdp.keyword-scores.request/v1",
+      candidates: [
+        { candidateId: "duplicate", demand: 70, competition: 20 },
+        { candidateId: "duplicate", demand: 60, competition: 10 },
+      ],
     }).success).toBe(false)
   })
 })

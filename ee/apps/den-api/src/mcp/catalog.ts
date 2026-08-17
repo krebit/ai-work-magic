@@ -3,6 +3,20 @@ import { z } from "zod"
 import { isMcpOperationAllowed, type OpenApiOperation } from "./policy.js"
 
 const METHODS = new Set(["get", "post", "put", "patch", "delete"])
+const CATALOG_CACHE_TTL_MS = 5 * 60 * 1000
+
+let catalogCache: { catalog: McpToolOperation[]; expiresAt: number } | null = null
+
+/** Shared OpenAPI-derived catalog cache for both MCP endpoints. */
+export async function getCatalog(app: Hono, env: unknown) {
+  if (catalogCache && catalogCache.expiresAt > Date.now()) {
+    return catalogCache.catalog
+  }
+  const document = await loadOpenApiDocument(app, env)
+  const catalog = buildMcpCatalog(document)
+  catalogCache = { catalog, expiresAt: Date.now() + CATALOG_CACHE_TTL_MS }
+  return catalog
+}
 
 // AWS Bedrock's Converse API rejects any `toolConfig.tools.*.member.toolSpec.name`
 // longer than 64 characters. MCP clients namespace our tools as

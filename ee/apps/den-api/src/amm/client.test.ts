@@ -55,6 +55,11 @@ const acknowledgementResponse = {
   requestId: "amm_req_test",
 }
 
+const cancellationAcknowledgementResponse = {
+  ...acknowledgementResponse,
+  state: "cancelled",
+}
+
 const servers: TestServer[] = []
 
 afterEach(async () => {
@@ -131,7 +136,7 @@ describe("AmmResearchClient", () => {
       config,
       fetchImpl: async (input, init) => {
         requests.push(`${init?.method} ${new URL(String(input)).pathname}`)
-        return Response.json(acknowledgementResponse)
+        return Response.json(init?.method === "DELETE" ? cancellationAcknowledgementResponse : acknowledgementResponse)
       },
     })
 
@@ -142,11 +147,23 @@ describe("AmmResearchClient", () => {
     const cancelled = await client.cancelRun("run_test", { requestId: "req_test" })
 
     expect(started).toEqual(acknowledgementResponse)
-    expect(cancelled).toEqual(acknowledgementResponse)
+    expect(cancelled).toEqual(cancellationAcknowledgementResponse)
     expect(requests).toEqual([
       "POST /api/v1/kdp/keyword-collections",
       "DELETE /api/v1/runs/run_test",
     ])
+  })
+
+  it.each(["running", "succeeded"])("rejects a %s cancellation acknowledgement", async (state) => {
+    const client = new AmmResearchClient({
+      config,
+      fetchImpl: () => Promise.resolve(Response.json({ ...acknowledgementResponse, state })),
+    })
+
+    await expectAmmRejection(
+      client.cancelRun("run_test", { requestId: "req_test" }),
+      "amm_invalid_response",
+    )
   })
 
   it("sends only the service authorization and public collection body downstream", async () => {
@@ -178,7 +195,7 @@ describe("AmmResearchClient", () => {
         : request.url === "/api/v1/kdp/keyword-scores"
           ? { scores: [] }
           : request.method === "DELETE"
-            ? acknowledgementResponse
+            ? cancellationAcknowledgementResponse
             : runResponse,
     }))
     const client = clientFor(server.baseUrl)

@@ -68,7 +68,19 @@ const scoreCandidateSchema = z.object({
 export const scoreAmmKdpKeywordsSchema = z.object({
   schemaVersion: z.literal("amm.kdp.keyword-scores.request/v1"),
   candidates: z.array(scoreCandidateSchema).min(1).max(500),
-}).strict()
+}).strict().superRefine((input, issue) => {
+  const candidateIds = new Set<string>()
+  for (const [index, candidate] of input.candidates.entries()) {
+    if (candidateIds.has(candidate.candidateId)) {
+      issue.addIssue({
+        code: "custom",
+        path: ["candidates", index, "candidateId"],
+        message: "candidate IDs must be unique",
+      })
+    }
+    candidateIds.add(candidate.candidateId)
+  }
+})
 
 export const ammOperationParamsSchema = z.object({
   operationId: z.string().trim().min(1).max(128),
@@ -97,6 +109,10 @@ export const ammRunAcknowledgementSchema = z.object({
   operation: z.string().trim().min(1).max(128),
   state: ammRunStateSchema,
   requestId: z.string().trim().min(1).max(128),
+}).strict()
+
+export const ammRunCancellationAcknowledgementSchema = ammRunAcknowledgementSchema.extend({
+  state: z.literal("cancelled"),
 }).strict()
 
 export const ammRunResponseSchema = z.object({

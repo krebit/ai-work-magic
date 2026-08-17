@@ -16,8 +16,10 @@ import {
 import {
   AmmServiceError,
   attachAmmRun,
+  beginAmmOperationStart,
   cancelOwnedAmmOperation,
   getOwnedAmmOperation,
+  prepareAmmOperationCancellation,
   reconcileAmmOperation,
   reserveAmmOperation,
   type AmmOperation,
@@ -26,12 +28,13 @@ import { checkEntitlement } from "../../entitlements.js"
 import { env } from "../../env.js"
 import {
   jsonValidator,
-  orgMemberRoute,
   paramValidator,
   queryValidator,
+} from "../../middleware/validation.js"
+import {
+  resolveOrganizationContextMiddleware,
   type OrganizationContextVariables,
-} from "../../middleware/index.js"
-import type { resolveOrganizationContextMiddleware } from "../../middleware/organization-context.js"
+} from "../../middleware/organization-context.js"
 import {
   denTypeIdSchema,
   invalidRequestSchema,
@@ -158,8 +161,10 @@ const terminalRunStates = new Set([
 
 export type AmmRouteService = {
   attachAmmRun: typeof attachAmmRun
+  beginAmmOperationStart: typeof beginAmmOperationStart
   cancelOwnedAmmOperation: typeof cancelOwnedAmmOperation
   getOwnedAmmOperation: typeof getOwnedAmmOperation
+  prepareAmmOperationCancellation: typeof prepareAmmOperationCancellation
   reconcileAmmOperation: typeof reconcileAmmOperation
   reserveAmmOperation: typeof reserveAmmOperation
 }
@@ -173,12 +178,15 @@ export type AmmRouteOptions = {
   client?: AmmRouteClient
   memberRoute?: typeof resolveOrganizationContextMiddleware
   service?: AmmRouteService
+  startCancellationWaitMs?: number
 }
 
 const defaultService: AmmRouteService = {
   attachAmmRun,
+  beginAmmOperationStart,
   cancelOwnedAmmOperation,
   getOwnedAmmOperation,
+  prepareAmmOperationCancellation,
   reconcileAmmOperation,
   reserveAmmOperation,
 }
@@ -264,6 +272,67 @@ async function reconcileTerminalRun(input: {
   })
 }
 
+function verifiedKeywordScoreResponse(
+  input: z.infer<typeof scoreAmmKdpKeywordsSchema>,
+  response: unknown,
+) {
+  const downstream = downstreamKeywordScoreResponseSchema.parse(response)
+  const expected = input.candidates
+    .map((candidate) => ({
+      candidateId: candidate.candidateId,
+      score: candidate.demand - candidate.competition,
+    }))
+    .sort((left, right) => right.score - left.score || compareCandidateIds(left.candidateId, right.candidateId))
+
+  const matchesExpected = downstream.rankings.length === expected.length
+    && expected.every((ranking, index) => {
+      const received = downstream.rankings[index]
+      return received?.candidateId === ranking.candidateId && received.score === ranking.score
+    })
+  if (!matchesExpected) throw new AmmClientError("amm_invalid_response")
+
+  return ammKeywordScoreResponseSchema.parse({
+    schemaVersion: downstream.schemaVersion,
+    rankings: downstream.rankings,
+  })
+}
+
+function compareCandidateIds(left: string, right: string) {
+  if (left < right) return -1
+  if (left > right) return 1
+  return 0
+}
+
+function wait(delayMs: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, delayMs))
+}
+
+async function prepareCancellationAfterStart(input: {
+  organizationId: DenTypeId<"organization">
+  operationId: DenTypeId<"ammOperation">
+  service: AmmRouteService
+  waitMs: number
+}) {
+  let prepared = await input.service.prepareAmmOperationCancellation({
+    organizationId: input.organizationId,
+    operationId: input.operationId,
+  })
+  if (prepared?.kind !== "start_pending") return prepared
+
+  const deadline = Date.now() + input.waitMs
+  let retryDelayMs = 5
+  while (prepared.kind === "start_pending" && Date.now() < deadline) {
+    await wait(Math.min(retryDelayMs, Math.max(1, deadline - Date.now())))
+    retryDelayMs = Math.min(retryDelayMs * 2, 100)
+    prepared = await input.service.prepareAmmOperationCancellation({
+      organizationId: input.organizationId,
+      operationId: input.operationId,
+    })
+    if (!prepared) return null
+  }
+  return prepared
+}
+
 function entitlementFor(c: {
   get(name: "organizationContext"): OrganizationContextVariables["organizationContext"]
 }) {
@@ -295,7 +364,8 @@ export function registerAmmRoutes<T extends { Variables: AmmRouteVariables }>(
 ) {
   const client = options.client ?? new AmmResearchClient({ config: env.amm })
   const service = options.service ?? defaultService
-  const orgMemberRouteMiddleware = options.memberRoute ?? orgMemberRoute()
+  const orgMemberRouteMiddleware = options.memberRoute ?? resolveOrganizationContextMiddleware
+  const startCancellationWaitMs = options.startCancellationWaitMs ?? env.amm?.timeoutMs ?? 10_000
 
   app.post(
     "/v1/amm/kdp/keyword-collections",
@@ -319,7 +389,7 @@ export function registerAmmRoutes<T extends { Variables: AmmRouteVariables }>(
       const input = c.req.valid("json")
       let reservedOperation: AmmOperation | undefined
       try {
-        const operation = await service.reserveAmmOperation({
+        const reserved = await service.reserveAmmOperation({
           organizationId: organization.organization.id,
           orgMembershipId: organization.currentMember.id,
           operationKey: input.operationKey,
@@ -327,7 +397,12 @@ export function registerAmmRoutes<T extends { Variables: AmmRouteVariables }>(
           capability: "kdp.keyword-collection",
           maximumUnits: input.limits.maxUnits,
         })
-        reservedOperation = operation
+        reservedOperation = reserved
+        const operation = await service.beginAmmOperationStart({
+          organizationId: organization.organization.id,
+          operationId: reserved.id,
+        })
+        if (!operation) throw new Error("AMM operation disappeared after reservation")
         if (operation.ammRunId) {
           const run = await client.getRun(operation.ammRunId, { requestId: c.get("requestId") })
           await reconcileTerminalRun({
@@ -348,13 +423,29 @@ export function registerAmmRoutes<T extends { Variables: AmmRouteVariables }>(
           idempotencyKey: operation.id,
           requestId: c.get("requestId"),
         })
-        await service.attachAmmRun({
+        const attached = await service.attachAmmRun({
           organizationId: organization.organization.id,
           operationId: operation.id,
           ammRunId: run.runId,
         })
+        if (!attached) throw new AmmServiceError("amm_operation_state_conflict")
+        if (terminalRunStates.has(run.state)) {
+          const terminalRun = await client.getRun(run.runId, { requestId: c.get("requestId") })
+          await reconcileTerminalRun({
+            organizationId: organization.organization.id,
+            operation: attached,
+            run: terminalRun,
+            service,
+          })
+          return c.json(publicRunResponse({
+            operationId: attached.id,
+            state: terminalRun.state,
+            result: terminalRun.result,
+            usage: terminalRun.usage,
+          }))
+        }
         return c.json(publicRunResponse({
-          operationId: operation.id,
+          operationId: attached.id,
           state: run.state,
           result: null,
         }), 202)
@@ -364,6 +455,12 @@ export function registerAmmRoutes<T extends { Variables: AmmRouteVariables }>(
           return c.json(reservedOperation
             ? { ...failure.body, operationId: reservedOperation.id }
             : failure.body, failure.status)
+        }
+        if (reservedOperation) {
+          return c.json({
+            error: "amm_request_failed",
+            operationId: reservedOperation.id,
+          }, 502)
         }
         throw error
       }
@@ -432,26 +529,34 @@ export function registerAmmRoutes<T extends { Variables: AmmRouteVariables }>(
       const organizationId = c.get("organizationContext").organization.id
       const { operationId } = c.req.valid("param")
       try {
-        const operation = await service.getOwnedAmmOperation({ organizationId, operationId })
-        if (!operation) return c.json({ error: "amm_operation_not_found" }, 404)
-        if (operation.state === "completed") {
-          throw new AmmServiceError("amm_operation_state_conflict")
+        const prepared = await prepareCancellationAfterStart({
+          organizationId,
+          operationId,
+          service,
+          waitMs: startCancellationWaitMs,
+        })
+        if (!prepared) return c.json({ error: "amm_operation_not_found" }, 404)
+        if (prepared.kind === "start_pending") {
+          return c.json({
+            error: "amm_operation_state_conflict",
+            operationId: prepared.operation.id,
+          }, 409)
         }
-        if (operation.state === "cancelled") {
+        if (prepared.kind === "cancelled") {
           return c.json(publicRunResponse({
-            operationId: operation.id,
+            operationId: prepared.operation.id,
             state: "cancelled",
             result: null,
           }))
         }
-        const run = operation.ammRunId
-          ? await client.cancelRun(operation.ammRunId, { requestId: c.get("requestId") })
-          : null
+        const ammRunId = prepared.operation.ammRunId
+        if (!ammRunId) throw new AmmServiceError("amm_operation_state_conflict")
+        const run = await client.cancelRun(ammRunId, { requestId: c.get("requestId") })
         const cancelled = await service.cancelOwnedAmmOperation({ organizationId, operationId })
         if (!cancelled) return c.json({ error: "amm_operation_not_found" }, 404)
         return c.json(publicRunResponse({
           operationId: cancelled.id,
-          state: run?.state ?? "cancelled",
+          state: run.state,
           result: null,
         }))
       } catch (error) {
@@ -524,14 +629,12 @@ export function registerAmmRoutes<T extends { Variables: AmmRouteVariables }>(
       const entitlement = entitlementFor(c)
       if (!entitlement.ok) return c.json(entitlement.response, entitlement.status)
       try {
-        const downstream = downstreamKeywordScoreResponseSchema.parse(await client.scoreKeywords(
-          c.req.valid("json"),
+        const input = c.req.valid("json")
+        const response = await client.scoreKeywords(
+          input,
           { requestId: c.get("requestId") },
-        ))
-        return c.json(ammKeywordScoreResponseSchema.parse({
-          schemaVersion: downstream.schemaVersion,
-          rankings: downstream.rankings,
-        }))
+        )
+        return c.json(verifiedKeywordScoreResponse(input, response))
       } catch (error) {
         const failure = routeFailure(error)
         if (failure) return c.json(failure.body, failure.status)

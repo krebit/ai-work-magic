@@ -6,34 +6,14 @@ import { z } from "zod"
 import { env } from "../env.js"
 import { publicRoute, tokenRoute } from "../middleware/index.js"
 import { getMcpResourceContext, verifyMcpRequest } from "./auth.js"
-import { buildMcpCatalog, getToolDescription, loadOpenApiDocument, type McpToolOperation } from "./catalog.js"
+import { getCatalog, getToolDescription } from "./catalog.js"
 import { invokeMcpOperation } from "./invoke.js"
 import { preflightMcpJsonRpcRequest } from "./json-rpc-preflight.js"
 import { getDenAuthIssuer } from "./jwt-policy.js"
 import { DEN_MCP_REQUESTED_SCOPES } from "./scopes.js"
 import { SEARCH_CAPABILITIES_TOOL_NAME, searchCapabilities } from "./search.js"
 
-const CATALOG_CACHE_TTL_MS = 5 * 60 * 1000
-
-let catalogCache: { catalog: McpToolOperation[]; expiresAt: number } | null = null
-
-/**
- * The tool catalog is derived from the OpenAPI document, which only changes
- * on deploy. Cache it briefly instead of self-fetching openapi.json and
- * rebuilding the catalog on every /mcp request.
- *
- * Exported so the minimal agent-facing endpoint (./agent.ts) shares this
- * exact cache instead of re-fetching/rebuilding the catalog separately.
- */
-export async function getCatalog(app: Hono, env: unknown) {
-  if (catalogCache && catalogCache.expiresAt > Date.now()) {
-    return catalogCache.catalog
-  }
-  const document = await loadOpenApiDocument(app, env)
-  const catalog = buildMcpCatalog(document)
-  catalogCache = { catalog, expiresAt: Date.now() + CATALOG_CACHE_TTL_MS }
-  return catalog
-}
+export { getCatalog }
 
 export function protectedResourceMetadata(request: Request, route: "mcp" | "agent" | "admin" = "mcp") {
   const resource = getMcpResourceContext(request, route).resourceUrl

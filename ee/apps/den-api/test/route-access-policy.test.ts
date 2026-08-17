@@ -161,10 +161,12 @@ describe("Den API route access policies", () => {
   test("every AMM research route requires organization membership", () => {
     const ammRoutePath = join(srcRoot, "routes/amm/index.ts")
     const ammRouteSource = readFileSync(ammRoutePath, "utf8")
+    const appSource = readFileSync(join(srcRoot, "app.ts"), "utf8")
     const ammRoutes = findRouteCalls(ammRoutePath)
 
     expect(ammRoutes).toHaveLength(5)
-    expect(ammRouteSource).toContain("const orgMemberRouteMiddleware = options.memberRoute ?? orgMemberRoute()")
+    expect(ammRouteSource).toContain("const orgMemberRouteMiddleware = options.memberRoute ?? resolveOrganizationContextMiddleware")
+    expect(appSource).toContain("registerAmmRoutes(app, { memberRoute: orgMemberRoute() })")
     expect(ammRoutes.every((route) => route.call.includes("orgMemberRouteMiddleware,"))).toBe(true)
   })
 })

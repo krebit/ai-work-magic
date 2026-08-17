@@ -274,6 +274,9 @@ function idempotentReservation(existing: AmmOperation, requestDigest: string) {
   if (existing.requestDigest !== requestDigest) {
     throw new AmmServiceError("amm_operation_conflict")
   }
+  if (existing.state === "cancelled" || existing.state === "completed") {
+    throw new AmmServiceError("amm_operation_state_conflict")
+  }
   return existing
 }
 
@@ -352,6 +355,27 @@ export function createAmmService(store: AmmStore, clock: () => Date = () => new 
     return store.findOwnedOperation(input.organizationId, input.operationId)
   }
 
+  function beginAmmOperationStart(input: OwnedAmmOperationInput) {
+    return store.transaction(async (transaction) => {
+      const operation = await transaction.findOwnedOperationForUpdate(
+        input.organizationId,
+        input.operationId,
+      )
+      if (!operation) return null
+      if (operation.state === "cancelled" || operation.state === "completed") {
+        throw new AmmServiceError("amm_operation_state_conflict")
+      }
+      if (operation.state === "running") return operation
+
+      const updatedAt = clock()
+      await transaction.updateOperation(operation.id, {
+        state: "running",
+        updatedAt,
+      })
+      return { ...operation, state: "running" as const, updatedAt }
+    })
+  }
+
   function attachAmmRun(input: AttachAmmRunInput) {
     return store.transaction(async (transaction) => {
       const operation = await transaction.findOwnedOperationForUpdate(
@@ -360,7 +384,7 @@ export function createAmmService(store: AmmStore, clock: () => Date = () => new 
       )
       if (!operation) return null
       if (operation.ammRunId === input.ammRunId) return operation
-      if (operation.state !== "reserved" || operation.ammRunId) {
+      if (operation.state !== "running" || operation.ammRunId) {
         throw new AmmServiceError("amm_operation_state_conflict")
       }
 
@@ -380,6 +404,46 @@ export function createAmmService(store: AmmStore, clock: () => Date = () => new 
     })
   }
 
+  function prepareAmmOperationCancellation(input: OwnedAmmOperationInput) {
+    return store.transaction(async (transaction) => {
+      const operation = await transaction.findOwnedOperationForUpdate(
+        input.organizationId,
+        input.operationId,
+      )
+      if (!operation) return null
+      if (operation.state === "completed") {
+        throw new AmmServiceError("amm_operation_state_conflict")
+      }
+      if (operation.state === "cancelled") {
+        return { kind: "cancelled" as const, operation }
+      }
+      if (operation.state === "running") {
+        return operation.ammRunId
+          ? { kind: "run_attached" as const, operation }
+          : { kind: "start_pending" as const, operation }
+      }
+
+      const bucket = requireOperationBucket(
+        await transaction.findOperationBucketForUpdate(operation),
+      )
+      const completedAt = clock()
+      await transaction.updateBucket(bucket.id, {
+        reservedUnits: releasedReservationUnits(bucket, operation),
+        usedUnits: bucket.usedUnits,
+        updatedAt: completedAt,
+      })
+      await transaction.updateOperation(operation.id, {
+        completedAt,
+        state: "cancelled",
+        updatedAt: completedAt,
+      })
+      return {
+        kind: "cancelled" as const,
+        operation: { ...operation, completedAt, state: "cancelled" as const, updatedAt: completedAt },
+      }
+    })
+  }
+
   function cancelOwnedAmmOperation(input: OwnedAmmOperationInput) {
     return store.transaction(async (transaction) => {
       const operation = await transaction.findOwnedOperationForUpdate(
@@ -389,6 +453,9 @@ export function createAmmService(store: AmmStore, clock: () => Date = () => new 
       if (!operation) return null
       if (operation.state === "cancelled") return operation
       if (operation.state === "completed") {
+        throw new AmmServiceError("amm_operation_state_conflict")
+      }
+      if (operation.state === "running" && !operation.ammRunId) {
         throw new AmmServiceError("amm_operation_state_conflict")
       }
 
@@ -473,8 +540,10 @@ export function createAmmService(store: AmmStore, clock: () => Date = () => new 
 
   return {
     attachAmmRun,
+    beginAmmOperationStart,
     cancelOwnedAmmOperation,
     getOwnedAmmOperation,
+    prepareAmmOperationCancellation,
     reconcileAmmOperation,
     reserveAmmOperation,
   }
@@ -483,7 +552,9 @@ export function createAmmService(store: AmmStore, clock: () => Date = () => new 
 const ammService = createAmmService(new DrizzleAmmStore())
 
 export const attachAmmRun = ammService.attachAmmRun
+export const beginAmmOperationStart = ammService.beginAmmOperationStart
 export const cancelOwnedAmmOperation = ammService.cancelOwnedAmmOperation
 export const getOwnedAmmOperation = ammService.getOwnedAmmOperation
+export const prepareAmmOperationCancellation = ammService.prepareAmmOperationCancellation
 export const reconcileAmmOperation = ammService.reconcileAmmOperation
 export const reserveAmmOperation = ammService.reserveAmmOperation

@@ -13,5 +13,11 @@ const { checkEntitlement } = await import("../entitlements.js")
 
 it("AMM managed research requires an explicit organization opt-in", () => {
   expect(checkEntitlement({ features: { ammResearch: true } }, "ammResearch", { gatingEnabled: true }).ok).toBe(true)
-  expect(checkEntitlement({ plan: { tier: "enterprise", source: "manual" } }, "ammResearch", { gatingEnabled: true }).ok).toBe(false)
+  const denied = checkEntitlement({ plan: { tier: "enterprise", source: "manual" } }, "ammResearch", { gatingEnabled: true })
+  expect(denied.ok).toBe(false)
+  if (!denied.ok) {
+    expect(denied.response.error).toBe("amm_research_not_enabled")
+    expect(denied.response.message).toContain("explicit organization access")
+    expect(denied.response.message).not.toContain("Enterprise plan")
+  }
 })

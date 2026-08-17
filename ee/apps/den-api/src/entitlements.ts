@@ -23,6 +23,14 @@ export type EnterprisePlanRequiredError = {
   message: string
 }
 
+export type AmmResearchNotEnabledError = {
+  error: "amm_research_not_enabled"
+  feature: "ammResearch"
+  message: string
+}
+
+export type EntitlementError = EnterprisePlanRequiredError | AmmResearchNotEnabledError
+
 const ENTITLEMENT_FEATURE_LABELS: Record<EntitlementKey, string> = {
   sso: "SSO / SAML",
   desktopPolicies: "Desktop policies",
@@ -101,13 +109,25 @@ export function checkEntitlement(
   metadata: MetadataInput,
   key: EntitlementKey,
   options: EntitlementOptions = {},
-): { ok: true } | { ok: false; status: 402; response: EnterprisePlanRequiredError } {
+): { ok: true } | { ok: false; status: 402; response: EntitlementError } {
   const entitled = key === "ammResearch"
     ? hasAmmResearchEntitlement(metadata)
     : getOrganizationEntitlements(metadata, options)[key]
 
   if (entitled) {
     return { ok: true }
+  }
+
+  if (key === "ammResearch") {
+    return {
+      ok: false,
+      status: 402,
+      response: {
+        error: "amm_research_not_enabled",
+        feature: key,
+        message: "AMM managed research requires explicit organization access. Talk to us at openworklabs.com/enterprise.",
+      },
+    }
   }
 
   return {

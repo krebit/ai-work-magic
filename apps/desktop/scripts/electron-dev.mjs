@@ -2,6 +2,7 @@ import { spawn, spawnSync } from "node:child_process";
 import net from "node:net";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolveElectronDevPort } from "./electron-dev-port.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const desktopRoot = resolve(__dirname, "..");
@@ -35,11 +36,8 @@ async function findFreeTcpPort() {
 }
 
 const rawPort = process.env.PORT?.trim() ?? "";
-const portValue = Number.parseInt(rawPort, 10);
-const devPort = rawPort === "0"
-  ? await findFreeTcpPort()
-  : Number.isFinite(portValue) && portValue > 0 ? portValue : 5173;
-if (rawPort === "0") {
+const devPort = await resolveElectronDevPort(rawPort, findFreeTcpPort);
+if (!rawPort || rawPort === "0") {
   console.log(`[electron-dev] Vite dev server will use free port ${devPort}`);
 }
 const explicitStartUrl = process.env.OPENWORK_ELECTRON_START_URL?.trim() || "";

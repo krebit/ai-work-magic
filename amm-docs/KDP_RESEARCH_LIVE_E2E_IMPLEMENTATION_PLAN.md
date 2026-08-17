@@ -11,6 +11,7 @@
 ## Global Constraints
 
 - Work on the current local branches. Do not create a git worktree.
+- Keep `dev` a clean mirror of `upstream/dev`; commit every AI Money Magic change only on `amm-dev`. Resolve any fork conflict on `amm-dev`, never by adding fork-specific code to `dev`.
 - Preserve unrelated changes in `ai-work-magic`, including the existing `.opencode/package-lock.json`, `.amm/`, and `portfolio.yaml` changes.
 - Den is the only public API/MCP gateway and the only authority for users, organizations, memberships, AMM entitlement, customer quota, and customer-visible operation ownership.
 - `ai-api-magic` receives no Den tenant, organization, member, subscription, entitlement, quota, or billing identifiers.
@@ -22,6 +23,10 @@
 - The existing Portfolio `Project` with normalized `kind: "research"` is the only local research identity. Do not create a separate `ResearchProject` or model research as a `book` project in a `research` lifecycle.
 - Persist each returned canonical collection as an immutable Portfolio research snapshot with typed observations. A Markdown niche brief may be registered and pinned as evidence, but must not be the sole or canonical persistence mechanism.
 - Record a Portfolio research decision only when the user explicitly supplies or confirms `accept`, `reject`, or `more-research`; a successful collection or score must not imply a decision.
+- Preserve the fork-owned adapter direction from `FORK_MAINTENANCE.md`: `@openwork/amm-portfolio` → `apps/server/src/routes/portfolio.ts` → renderer Portfolio domain and OpenCode semantic affordances. The KDP feature consumes these adapters; it must not add a parallel router, auth path, workspace store, persistence path, agent protocol, or application shell.
+- Keep Portfolio implementation in fork-owned surfaces: `packages/amm-portfolio/**`, `apps/server/src/routes/portfolio.ts`, `apps/app/src/react-app/domains/portfolio/**`, Portfolio-focused tests, and `amm-docs/PORTFOLIO.md`. Do not fold it into broad upstream files merely to simplify an initial implementation.
+- Treat `apps/server/src/server.ts`, `apps/app/src/app/lib/openwork-server.ts`, the renderer shell/route/sidebar files, `apps/server/src/opencode-plugins/openwork-provider-adapters.ts`, and `apps/server/src/opencode-plugins/openwork-extensions-preview.ts` as narrow conflict hotspots. Preserve upstream structure during a rebase and restore only the smallest Portfolio registration, client, navigation, feature-contribution, and authenticated-dispatch hooks.
+- Regenerate `pnpm-lock.yaml` with `pnpm` after dependency conflicts; never hand-merge lockfile package snapshots.
 - Real provider tests must use one keyword, `search.depth: 3`, `maxProducts: 3`, `maxPages: 1`, and `maxUnits: 20`. Do not broaden those limits while diagnosing a failure.
 - The live lane requires real DataForSEO and SerpApi calls. MerchantWords may participate in the expansion smoke only after the collection proof passes. Never print environment values.
 - The authoritative pass/fail artifact is an `evals/specs/**/*.slow.test.ts` `@openwork/testkit` tape. Playwright MCP is the interactive browser driver and diagnostic witness, not the sole assertion mechanism.
@@ -73,6 +78,21 @@ portfolio.research.decision.record
 ```
 
 The KDP integration must use these semantic affordances through `openwork_query` and `openwork_execute`; it must not write `.amm/portfolio.sqlite` directly.
+
+## Fork-Rebase Boundary for This Slice
+
+The generic research-history implementation is fork-owned and is assumed complete. The KDP slice must remain a vertical adapter on top of it:
+
+```text
+generated KDP skill
+  -> existing portfolio.* semantic dispatcher
+  -> existing authenticated Portfolio route
+  -> @openwork/amm-portfolio
+```
+
+When a KDP change needs Portfolio capability discovery or dispatch, extend the existing single Portfolio built-in feature contribution and its single authenticated local-server dispatcher in `apps/server/src/opencode-plugins/openwork-provider-adapters.ts` and `apps/server/src/opencode-plugins/openwork-extensions-preview.ts`. Do not duplicate the `portfolio.research.*` catalog in the KDP skill, Den, or a second server plugin.
+
+For every rebase onto `dev`, resolve and verify in this order: (1) `packages/amm-portfolio` and package tests, (2) package wiring and `registerPortfolioRoutes` in the current upstream server shape, (3) workspace-scoped renderer client methods, (4) Portfolio domain UI in the current upstream shell/routes/sidebar, (5) the single OpenCode feature contribution and dispatcher, (6) KDP skill installation, documentation, and app-driving specs. Build each completed layer before resolving the next one.
 
 The first callable Den operations are deliberately small:
 
@@ -954,6 +974,18 @@ pnpm --filter @openwork/app typecheck
 pnpm --dir evals typecheck
 ```
 
+Also run the independent local Portfolio proof required by `FORK_MAINTENANCE.md`:
+
+```bash
+OPENWORK_EVAL_APP_SPECS=1 \
+pnpm --dir evals exec vitest run \
+  --config vitest.config.ts \
+  --project stack \
+  specs/local-portfolio-workspace.slow.test.ts
+```
+
+Record the live KDP lane and this local Portfolio lane separately. A skipped or environment-blocked lane is `Incomplete`, not `Passed`.
+
 - [ ] **Step 2: Cold boot the complete stack**
 
 Stop the warm Den, AMM API/worker, and headless web processes through their documented non-destructive shutdown paths. Restart from Task 8 without a warm Den reuse override. Do not delete developer databases; use the reset seed only for Den's designated local demo data.
@@ -970,7 +1002,21 @@ Incomplete infrastructure or credential requirement prevented an assertion; incl
 Failed     product behavior violated an assertion; include exact repro and preserved evidence
 ```
 
-- [ ] **Step 5: Commit final documentation separately in each affected repository**
+- [ ] **Step 5: Prove the completed KDP slice replays across an upstream rebase**
+
+From a clean commit boundary on `amm-dev`, follow the exact maintenance flow:
+
+```bash
+git fetch upstream
+git switch dev
+git merge --ff-only upstream/dev
+git switch amm-dev
+git rebase dev
+```
+
+If a conflict occurs, resolve only the current dependency layer in the order declared in **Fork-Rebase Boundary for This Slice**. Keep fork-specific changes out of `dev`; regenerate `pnpm-lock.yaml` with `pnpm` if dependency wiring conflicts. Re-run the focused verification from Step 1 and Task 9 after the rebase. Do not push or force-push unless separately requested.
+
+- [ ] **Step 6: Commit final documentation separately in each affected repository**
 
 Never combine unrelated existing changes. Do not push or open a PR unless separately requested.
 
@@ -991,6 +1037,9 @@ Never combine unrelated existing changes. Do not push or open a PR unless separa
 - [ ] The workspace-relative Markdown artifact exists and an evidence link pins its exact artifact version; it is not the sole canonical research record.
 - [ ] The Research history UI renders the saved run, snapshot, observations, evaluation, and linked evidence.
 - [ ] No research decision exists unless the user explicitly chose `accept`, `reject`, or `more-research`.
+- [ ] The KDP skill uses the existing single Portfolio semantic feature contribution and authenticated dispatcher; it adds no parallel Portfolio route, persistence, authentication, workspace, UI-shell, or agent-tool protocol.
+- [ ] The local Portfolio app-driving lane `evals/specs/local-portfolio-workspace.slow.test.ts` and the KDP live lane are both reported after a rebase; neither may be counted as passed when skipped or blocked.
+- [ ] A rebase onto the current `dev` preserves the fork-owned Portfolio package, route, UI domain, and single OpenCode adapter while retaining the current upstream integration structure.
 - [ ] Another workspace remains unchanged.
 - [ ] No manuscript, publication, campaign, or unapproved consequential action occurs.
 - [ ] The service key and Den identifiers are absent from browser state, chat, artifacts, tape, AMM requests, and corpus records as applicable.

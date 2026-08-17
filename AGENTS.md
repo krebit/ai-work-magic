@@ -22,6 +22,14 @@ The app consumes OpenWork server surfaces (self-hosted or hosted) rather than
 inventing parallel behavior. Anything OpenCode can do is available in OpenWork,
 even before a dedicated UI exists.
 
+## Fork workflow
+
+- Read [`FORK_MAINTENANCE.md`](./FORK_MAINTENANCE.md) before updating from the
+  official OpenWork repository or changing branch history.
+- Keep `dev` as a clean mirror of `upstream/dev`.
+- Make and commit fork-specific changes on `amm-dev`, never on `dev`.
+- Do not submit fork-specific changes to the upstream OpenWork repository.
+
 ## Verification (every change)
 
 - The only proof path is `evals/specs/**/*.test.ts` with `test` from

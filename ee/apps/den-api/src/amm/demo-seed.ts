@@ -63,7 +63,7 @@ export async function ensureDemoAmmUsageBucket(input: {
       return currentBuckets[0]
     }
 
-    if (currentBuckets.length > 0) {
+    if (existingBuckets.length > 0) {
       throw new DemoAmmSeedResetRequiredError(input.organizationId)
     }
 

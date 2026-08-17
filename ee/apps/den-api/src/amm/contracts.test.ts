@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
-import { startAmmKdpKeywordCollectionSchema, toAmmCollectionBody } from "./contracts.js"
+import { startAmmKdpKeywordCollectionSchema, toAmmCollectionBody, type StartAmmKdpKeywordCollection } from "./contracts.js"
 
-const liveRequest = {
+const liveRequest: StartAmmKdpKeywordCollection = {
   operationKey: "kdp-live-2026-08-17-001",
   evaluationTargetAsOf: "2026-08-17T00:00:00.000Z",
   keyword: "fantasy romance",

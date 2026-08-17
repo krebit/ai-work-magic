@@ -48,6 +48,13 @@ const runResponse = {
   requestId: "amm_req_test",
 }
 
+const acknowledgementResponse = {
+  runId: "run_test",
+  operation: "kdp.keyword-collection",
+  state: "queued",
+  requestId: "amm_req_test",
+}
+
 const servers: TestServer[] = []
 
 afterEach(async () => {
@@ -118,15 +125,39 @@ async function expectAmmRejection(promise: Promise<unknown>, code: AmmClientErro
 }
 
 describe("AmmResearchClient", () => {
+  it("accepts the live strict start and cancel acknowledgements without a result", async () => {
+    const requests: string[] = []
+    const client = new AmmResearchClient({
+      config,
+      fetchImpl: async (input, init) => {
+        requests.push(`${init?.method} ${new URL(String(input)).pathname}`)
+        return Response.json(acknowledgementResponse)
+      },
+    })
+
+    const started = await client.startCollection(collectionInput, {
+      idempotencyKey: "denop_globally_unique_test",
+      requestId: "req_test",
+    })
+    const cancelled = await client.cancelRun("run_test", { requestId: "req_test" })
+
+    expect(started).toEqual(acknowledgementResponse)
+    expect(cancelled).toEqual(acknowledgementResponse)
+    expect(requests).toEqual([
+      "POST /api/v1/kdp/keyword-collections",
+      "DELETE /api/v1/runs/run_test",
+    ])
+  })
+
   it("sends only the service authorization and public collection body downstream", async () => {
-    const server = await startServer(() => ({ body: runResponse }))
+    const server = await startServer(() => ({ body: acknowledgementResponse }))
 
     const result = await clientFor(server.baseUrl).startCollection(collectionInput, {
       idempotencyKey: "denop_globally_unique_test",
       requestId: "req_test",
     })
 
-    expect(result).toEqual(runResponse)
+    expect(result).toEqual(acknowledgementResponse)
     expect(server.requests).toHaveLength(1)
     const [captured] = server.requests
     expect(captured.method).toBe("POST")
@@ -146,7 +177,9 @@ describe("AmmResearchClient", () => {
         ? { observations: [] }
         : request.url === "/api/v1/kdp/keyword-scores"
           ? { scores: [] }
-          : runResponse,
+          : request.method === "DELETE"
+            ? acknowledgementResponse
+            : runResponse,
     }))
     const client = clientFor(server.baseUrl)
 

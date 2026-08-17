@@ -90,10 +90,19 @@ export const ammProviderUsageSchema = z.object({
 
 export type AmmProviderUsage = z.infer<typeof ammProviderUsageSchema>
 
+const ammRunStateSchema = z.enum(["queued", "running", "succeeded", "partially_succeeded", "failed", "cancelled", "expired"])
+
+export const ammRunAcknowledgementSchema = z.object({
+  runId: z.string().trim().min(1).max(128),
+  operation: z.string().trim().min(1).max(128),
+  state: ammRunStateSchema,
+  requestId: z.string().trim().min(1).max(128),
+}).strict()
+
 export const ammRunResponseSchema = z.object({
   runId: z.string().trim().min(1).max(128),
   operation: z.string().trim().min(1).max(128),
-  state: z.enum(["queued", "running", "succeeded", "partially_succeeded", "failed", "cancelled", "expired"]),
+  state: ammRunStateSchema,
   result: z.unknown().nullable(),
   usage: ammProviderUsageSchema.optional(),
   requestId: z.string().trim().min(1).max(128),

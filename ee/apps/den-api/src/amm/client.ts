@@ -1,6 +1,7 @@
 import {
   ammKeywordObservationQuerySchema,
   ammOperationParamsSchema,
+  ammRunAcknowledgementSchema,
   ammRunResponseSchema,
   scoreAmmKdpKeywordsSchema,
   startAmmKdpKeywordCollectionSchema,
@@ -79,6 +80,12 @@ function parseRunResponse(response: unknown) {
   return parsed.data
 }
 
+function parseRunAcknowledgement(response: unknown) {
+  const parsed = ammRunAcknowledgementSchema.safeParse(response)
+  if (!parsed.success) throw new AmmClientError("amm_invalid_response")
+  return parsed.data
+}
+
 export class AmmResearchClient {
   private readonly config: AmmResearchClientConfig | null
   private readonly fetchImpl: typeof fetch
@@ -96,7 +103,7 @@ export class AmmResearchClient {
       method: "POST",
       requestId: context.requestId,
     })
-    return parseRunResponse(response)
+    return parseRunAcknowledgement(response)
   }
 
   async getRun(runId: string, context: AmmRequestContext) {
@@ -114,7 +121,7 @@ export class AmmResearchClient {
       method: "DELETE",
       requestId: context.requestId,
     })
-    return parseRunResponse(response)
+    return parseRunAcknowledgement(response)
   }
 
   async getKeywordObservations(input: unknown, context: AmmRequestContext): Promise<unknown> {

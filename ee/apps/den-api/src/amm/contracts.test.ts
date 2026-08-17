@@ -1,5 +1,10 @@
 import { describe, expect, it } from "bun:test"
-import { startAmmKdpKeywordCollectionSchema, toAmmCollectionBody, type StartAmmKdpKeywordCollection } from "./contracts.js"
+import {
+  ammRunAcknowledgementSchema,
+  startAmmKdpKeywordCollectionSchema,
+  toAmmCollectionBody,
+  type StartAmmKdpKeywordCollection,
+} from "./contracts.js"
 
 const liveRequest: StartAmmKdpKeywordCollection = {
   operationKey: "kdp-live-2026-08-17-001",
@@ -82,5 +87,30 @@ describe("AMM Den contracts", () => {
       evidenceLevel: "standard",
     })
     expectNoProhibitedIdentityFields(body)
+  })
+
+  it("accepts the strict live start/cancel acknowledgement without a result", () => {
+    expect(ammRunAcknowledgementSchema.parse({
+      runId: "0198b5f0-7b80-7000-8000-000000000001",
+      operation: "kdp.keyword-collection",
+      state: "queued",
+      requestId: "req_contract_test",
+    })).toEqual({
+      runId: "0198b5f0-7b80-7000-8000-000000000001",
+      operation: "kdp.keyword-collection",
+      state: "queued",
+      requestId: "req_contract_test",
+    })
+  })
+
+  it.each(prohibitedIdentityFields)("rejects the acknowledgement %s identity field", (field) => {
+    const result = ammRunAcknowledgementSchema.safeParse({
+      runId: "0198b5f0-7b80-7000-8000-000000000001",
+      operation: "kdp.keyword-collection",
+      state: "queued",
+      requestId: "req_contract_test",
+      [field]: "forbidden",
+    })
+    expect(result.success).toBe(false)
   })
 })

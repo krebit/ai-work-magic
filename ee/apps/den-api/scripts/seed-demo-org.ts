@@ -103,6 +103,16 @@ const demoAmmSeedStore: DemoAmmSeedStore = {
     insertAmmUsageBucket: async (bucket) => {
       await tx.insert(AmmUsageBucketTable).values(bucket)
     },
+    listAmmUsageBuckets: async (organizationId) => tx
+      .select({
+        id: AmmUsageBucketTable.id,
+        limitUnits: AmmUsageBucketTable.limitUnits,
+        organizationId: AmmUsageBucketTable.organizationId,
+        windowEndAt: AmmUsageBucketTable.windowEndAt,
+        windowStartAt: AmmUsageBucketTable.windowStartAt,
+      })
+      .from(AmmUsageBucketTable)
+      .where(eq(AmmUsageBucketTable.organizationId, organizationId)),
     lockOrganization: async (organizationId) => {
       const organization = await tx
         .select({ id: OrganizationTable.id })

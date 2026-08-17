@@ -47,6 +47,10 @@ class MemoryDemoAmmSeedStore implements DemoAmmSeedStore, DemoAmmSeedTransaction
     }
   }
 
+  async listAmmUsageBuckets(organizationId: DenTypeId<"organization">) {
+    return this.bucketsFor(organizationId).map((bucket) => ({ ...bucket }))
+  }
+
   async insertAmmUsageBucket(bucket: DemoAmmUsageBucket) {
     this.events.push(`insert:${bucket.organizationId}`)
     this.buckets.set(bucket.id, { ...bucket })
@@ -84,28 +88,30 @@ test("demo seed metadata explicitly grants AMM research", () => {
   })
 })
 
-test("demo seed replaces overlapping current buckets with one finite 100-unit bucket on repeat", async () => {
+test("ordinary demo seed returns an existing correct bucket without mutation", async () => {
   const store = new MemoryDemoAmmSeedStore()
-  store.seedBucket({
-    limitUnits: 1,
+  const bucket = store.seedBucket({
+    limitUnits: 100,
     organizationId: demoOrganizationId,
-    windowEndAt: new Date(now.getTime() + 60_000),
-    windowStartAt: new Date(now.getTime() - 60_000),
-  })
-  store.seedBucket({
-    limitUnits: 999,
-    organizationId: demoOrganizationId,
-    windowEndAt: new Date(now.getTime() + 120_000),
-    windowStartAt: new Date(now.getTime() - 120_000),
-  })
-  store.seedBucket({
-    limitUnits: 77,
-    organizationId: otherOrganizationId,
-    windowEndAt: new Date(now.getTime() + 60_000),
-    windowStartAt: new Date(now.getTime() - 60_000),
+    windowEndAt: new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000),
+    windowStartAt: now,
   })
 
-  await ensureDemoAmmUsageBucket({ now, organizationId: demoOrganizationId, store })
+  const first = await ensureDemoAmmUsageBucket({ now, organizationId: demoOrganizationId, store })
+  const second = await ensureDemoAmmUsageBucket({ now, organizationId: demoOrganizationId, store })
+
+  expect(first).toEqual(bucket)
+  expect(second).toEqual(bucket)
+  expect(store.bucketsFor(demoOrganizationId)).toEqual([bucket])
+  expect(store.events).toEqual([
+    `lock:${demoOrganizationId}`,
+    `lock:${demoOrganizationId}`,
+  ])
+})
+
+test("ordinary demo seed creates the canonical bucket only when no AMM bucket exists", async () => {
+  const store = new MemoryDemoAmmSeedStore()
+
   await ensureDemoAmmUsageBucket({ now, organizationId: demoOrganizationId, store })
 
   expect(store.bucketsFor(demoOrganizationId)).toEqual([
@@ -116,7 +122,32 @@ test("demo seed replaces overlapping current buckets with one finite 100-unit bu
       windowStartAt: now,
     }),
   ])
-  expect(store.bucketsFor(otherOrganizationId)).toHaveLength(1)
+})
+
+test("ordinary demo seed preserves malformed AMM state and requires reset", async () => {
+  const store = new MemoryDemoAmmSeedStore()
+  const malformedBucket = store.seedBucket({
+    limitUnits: 1,
+    organizationId: demoOrganizationId,
+    windowEndAt: new Date(now.getTime() + 60_000),
+    windowStartAt: new Date(now.getTime() - 60_000),
+  })
+  const overlappingBucket = store.seedBucket({
+    limitUnits: 100,
+    organizationId: demoOrganizationId,
+    windowEndAt: new Date(now.getTime() + 120_000),
+    windowStartAt: new Date(now.getTime() - 120_000),
+  })
+  store.ledgerOrganizationIds.add(demoOrganizationId)
+  store.operationOrganizationIds.add(demoOrganizationId)
+
+  await expect(ensureDemoAmmUsageBucket({ now, organizationId: demoOrganizationId, store }))
+    .rejects.toThrow("requires --reset")
+
+  expect(store.bucketsFor(demoOrganizationId)).toEqual([malformedBucket, overlappingBucket])
+  expect(store.ledgerOrganizationIds.has(demoOrganizationId)).toBe(true)
+  expect(store.operationOrganizationIds.has(demoOrganizationId)).toBe(true)
+  expect(store.events).toEqual([`lock:${demoOrganizationId}`])
 })
 
 test("concurrent demo seeds leave exactly one current AMM bucket", async () => {
@@ -136,6 +167,8 @@ test("concurrent demo seeds leave exactly one current AMM bucket", async () => {
     }),
   ])
   expect(store.events.filter((event) => event === `lock:${demoOrganizationId}`)).toHaveLength(8)
+  expect(store.events.filter((event) => event === `insert:${demoOrganizationId}`)).toHaveLength(1)
+  expect(store.events.filter((event) => event === `buckets:${demoOrganizationId}`)).toHaveLength(0)
 })
 
 test("demo reset cleanup removes AMM rows in dependency order", async () => {

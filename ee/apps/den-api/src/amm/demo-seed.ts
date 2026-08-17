@@ -16,11 +16,19 @@ export type DemoAmmSeedTransaction = {
   deleteAmmUsageBuckets(organizationId: DenTypeId<"organization">): Promise<void>
   deleteAmmUsageLedgerEntries(organizationId: DenTypeId<"organization">): Promise<void>
   insertAmmUsageBucket(bucket: DemoAmmUsageBucket): Promise<void>
+  listAmmUsageBuckets(organizationId: DenTypeId<"organization">): Promise<DemoAmmUsageBucket[]>
   lockOrganization(organizationId: DenTypeId<"organization">): Promise<void>
 }
 
 export type DemoAmmSeedStore = {
   transaction<T>(run: (transaction: DemoAmmSeedTransaction) => Promise<T>): Promise<T>
+}
+
+export class DemoAmmSeedResetRequiredError extends Error {
+  constructor(organizationId: DenTypeId<"organization">) {
+    super(`Demo AMM bucket state for ${organizationId} requires --reset before reseeding.`)
+    this.name = "DemoAmmSeedResetRequiredError"
+  }
 }
 
 export function createDemoOrganizationMetadata(updatedAt: Date) {
@@ -46,7 +54,18 @@ export async function ensureDemoAmmUsageBucket(input: {
 }) {
   return input.store.transaction(async (transaction) => {
     await transaction.lockOrganization(input.organizationId)
-    await transaction.deleteAmmUsageBuckets(input.organizationId)
+    const existingBuckets = await transaction.listAmmUsageBuckets(input.organizationId)
+    const currentBuckets = existingBuckets.filter((bucket) => (
+      bucket.windowStartAt <= input.now && bucket.windowEndAt > input.now
+    ))
+
+    if (currentBuckets.length === 1 && currentBuckets[0]?.limitUnits === DEMO_AMM_USAGE_LIMIT_UNITS) {
+      return currentBuckets[0]
+    }
+
+    if (currentBuckets.length > 0) {
+      throw new DemoAmmSeedResetRequiredError(input.organizationId)
+    }
 
     const bucket: DemoAmmUsageBucket = {
       id: createDenTypeId("ammUsageBucket"),

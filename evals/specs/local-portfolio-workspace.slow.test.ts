@@ -64,6 +64,7 @@ test.skipIf(!enabled)(title, async ({ evidence }) => {
   expect(typeof parentId).toBe("string");
   await createProject({ title: "Episode One", kind: "episode", vertical: "short-drama", parent: String(parentId) });
   await createProject({ title: "Night Signals", kind: "album", vertical: "music" });
+  await createProject({ title: "Camping Journal Research", kind: "research", vertical: "amazon-kdp" });
 
   const visible = await evalIn(app, `document.querySelector('[data-portfolio-page]')?.textContent ?? ""`);
   expect(String(visible)).toContain("Moon Harbor");
@@ -72,6 +73,10 @@ test.skipIf(!enabled)(title, async ({ evidence }) => {
   expect(String(visible)).toContain("short-drama");
   expect(String(visible)).toContain("music");
   evidence.fact("One Portfolio contains mixed verticals and one child project", "Moon Harbor, child Episode One, and music project Night Signals are visible together.", true);
+
+  expect(await clickText(app, "History")).toBe(true);
+  await waitFor(app, `document.body.innerText.includes("Research history") && document.body.innerText.includes("No observations have been recorded yet")`, { timeoutMs: 30_000, label: "research history surface" });
+  evidence.fact("Research is a generic Portfolio project capability", "The research project exposes its workspace-local history with an explicit empty state.", true);
 
   await evalIn(app, `(() => { const select = document.querySelector('select[aria-label="Lifecycle for Night Signals"]'); if (!(select instanceof HTMLSelectElement)) return false; select.value = "publication"; select.dispatchEvent(new Event("change", { bubbles: true })); return true; })()`);
   await waitFor(app, `document.querySelector('select[aria-label="Lifecycle for Night Signals"]')?.value === "publication"`, { timeoutMs: 30_000, label: "publication lifecycle" });

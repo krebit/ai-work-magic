@@ -73,6 +73,12 @@ CREATE TABLE IF NOT EXISTS research_observations (
   observation_digest TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS research_observation_lookup ON research_observations(subject_type, subject_key, metric, observed_at);
+CREATE TABLE IF NOT EXISTS research_evidence_links (
+  id TEXT PRIMARY KEY, snapshot_id TEXT NOT NULL REFERENCES research_snapshots(id),
+  observation_id TEXT REFERENCES research_observations(id), artifact_id TEXT NOT NULL REFERENCES artifacts(id),
+  artifact_version_id TEXT NOT NULL REFERENCES artifact_versions(id), role TEXT NOT NULL, captured_at TEXT NOT NULL,
+  rights_classification TEXT, created_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS research_evaluations (
   id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), snapshot_id TEXT NOT NULL REFERENCES research_snapshots(id),
   evaluation_type TEXT NOT NULL, policy_ref TEXT NOT NULL, engine_ref TEXT, evaluation_as_of TEXT NOT NULL,

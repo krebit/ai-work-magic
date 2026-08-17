@@ -172,7 +172,8 @@ export type PortfolioResearchSnapshot = { id: string; projectId: string; runId: 
 export type PortfolioResearchObservation = { id: string; snapshotId: string; subjectType: string; subjectKey: string; metric: string; valueType: "string" | "integer" | "decimal" | "boolean" | "json"; canonicalValue: unknown; unit: string | null; provider: string | null; providerVersion: string | null; observedAt: string; evidenceRefs: string[]; observationDigest: string };
 export type PortfolioResearchEvaluation = { id: string; projectId: string; snapshotId: string; evaluationType: string; policyRef: string; engineRef: string | null; evaluationAsOf: string; requestPayload: Record<string, unknown>; requestDigest: string; resultPayload: Record<string, unknown>; resultDigest: string; createdAt: string };
 export type PortfolioResearchDecision = { id: string; projectId: string; evaluationId: string | null; decision: "accept" | "reject" | "more-research"; rationale: string; selectedSubjectRefs: string[]; requestedFollowUp: string[]; actorRef: string; decidedAt: string; supersedesDecisionId: string | null };
-export type PortfolioResearchHistory = { runs: PortfolioResearchRun[]; snapshots: PortfolioResearchSnapshot[]; observations: PortfolioResearchObservation[]; evaluations: PortfolioResearchEvaluation[]; decisions: PortfolioResearchDecision[] };
+export type PortfolioResearchEvidenceLink = { id: string; snapshotId: string; observationId: string | null; artifactId: string; artifactVersionId: string; role: string; capturedAt: string; rightsClassification: string | null; createdAt: string };
+export type PortfolioResearchHistory = { runs: PortfolioResearchRun[]; snapshots: PortfolioResearchSnapshot[]; observations: PortfolioResearchObservation[]; evidence: PortfolioResearchEvidenceLink[]; evaluations: PortfolioResearchEvaluation[]; decisions: PortfolioResearchDecision[] };
 
 export type OpenworkServerDiagnostics = {
   ok: boolean;

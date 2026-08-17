@@ -28,6 +28,7 @@ describe("OpenWork provider adapters", () => {
       "portfolio.research.run.complete",
       "portfolio.research.snapshot.seal",
       "portfolio.research.observations.list",
+      "portfolio.research.evidence.link",
       "portfolio.research.evaluation.record",
       "portfolio.research.decision.record",
     ]);

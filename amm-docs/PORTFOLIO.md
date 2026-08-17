@@ -26,6 +26,7 @@ An uninitialized workspace displays an explicit **Create portfolio** action. Aft
 - Assigning a free-form project kind and vertical.
 - Moving projects through lifecycle stages.
 - Viewing mixed verticals in one Portfolio.
+- Opening **History** on any `kind=research` project to view its longitudinal records.
 
 The current page is an overview and creation surface. The underlying repository and agent surface also support project relationships, session context, and registered artifacts, although dedicated UI controls for all of those operations have not yet been added.
 
@@ -42,7 +43,7 @@ Initializing a Portfolio creates the following workspace-local files:
     portfolio.sqlite
 ```
 
-`portfolio.yaml` is lightweight discovery metadata. `.amm/portfolio.sqlite` is authoritative for Portfolio identity, projects, relationships, lifecycle state, session context, artifact registration, revisions, and timestamps.
+`portfolio.yaml` is lightweight discovery metadata. `.amm/portfolio.sqlite` is authoritative for Portfolio identity, projects, relationships, lifecycle state, session context, artifact registration, research history, revisions, and timestamps.
 
 The database uses Better SQLite3 with foreign keys and WAL mode. It is deliberately separate from OpenWork's runtime database:
 
@@ -70,6 +71,8 @@ A Portfolio contains generic projects. A project has:
 
 Examples of `kind` include `book`, `series`, `edition`, `album`, `episode`, `video`, and `campaign`. Examples of `vertical` include `publishing`, `music`, `video`, and `short-drama`.
 
+Research uses that same identity: a project with `kind` equal to `research` and a domain-specific vertical such as `amazon-kdp`, `music`, `video`, or `marketing`. There is no separate research-project record.
+
 Lifecycle stages are:
 
 ```text
@@ -96,9 +99,19 @@ derived-from
 promotion-for
 companion-to
 supersedes
+informed
+validated
+invalidated
+produced
 ```
 
 This supports relationships such as a video adapting a book, a campaign promoting an album, or a new edition superseding an older edition.
+
+### Research history
+
+A research project owns append-only runs, immutable snapshots, typed timestamped observations, evaluations, and attributed decisions. Evidence links pin exact registered artifact versions, so later file changes cannot rewrite historical evidence. New collections and rescoring append records instead of replacing earlier results.
+
+The schema is deliberately generic: vertical integrations own collection and scoring rules, while this repository preserves their canonical payloads and digests. Den and hosted APIs may own the global corpus, quotas, and billing; the user's private research copy stays in `<workspace>/.amm/portfolio.sqlite`.
 
 ### Session context
 
@@ -139,6 +152,15 @@ PUT    /workspace/:id/portfolio/sessions/:sessionId
 
 GET    /workspace/:id/portfolio/artifacts
 POST   /workspace/:id/portfolio/artifacts
+
+GET    /workspace/:id/portfolio/projects/:projectId/research
+POST   /workspace/:id/portfolio/projects/:projectId/research/runs
+PATCH  /workspace/:id/portfolio/projects/:projectId/research/runs/:runId
+POST   /workspace/:id/portfolio/projects/:projectId/research/snapshots
+GET    /workspace/:id/portfolio/projects/:projectId/research/observations
+POST   /workspace/:id/portfolio/projects/:projectId/research/evidence
+POST   /workspace/:id/portfolio/projects/:projectId/research/evaluations
+POST   /workspace/:id/portfolio/projects/:projectId/research/decisions
 ```
 
 Reads require the normal local client authentication. Mutations additionally require a writable server and the existing `collaborator` token scope. The server resolves the workspace root internally, so a client cannot use these routes to select an arbitrary SQLite database.
@@ -199,6 +221,14 @@ portfolio.session.get
 portfolio.session.set
 portfolio.artifacts.list
 portfolio.artifact.register
+portfolio.research.inspect
+portfolio.research.run.create
+portfolio.research.run.complete
+portfolio.research.snapshot.seal
+portfolio.research.observations.list
+portfolio.research.evidence.link
+portfolio.research.evaluation.record
+portfolio.research.decision.record
 ```
 
 If the current OpenCode directory identifies a workspace, `workspaceId` may be omitted. If the context is ambiguous, the agent must pass a workspace ID or exact workspace name.
@@ -219,6 +249,10 @@ Register output/trailer-final.mp4 as the release-master artifact for Moon Harbor
 Show me every artifact registered to this project.
 
 Relate the trailer project to Moon Harbor as promotion-for.
+
+Create an amazon-kdp research project called Camping Journal Opportunity, research the niche, and preserve its run, snapshot, keyword observations, evidence, evaluation, and decision.
+
+Compare the keyword observations over time, then relate the research to Camping Journal Series as informed.
 ```
 
 The system instruction tells the agent to keep Portfolio metadata synchronized when the user asks it to create, organize, publish, promote, or track durable project work. Mutations still happen only when appropriate to the user's request; merely discussing an idea does not initialize or modify a Portfolio.
@@ -257,7 +291,7 @@ apps/app/src/app/lib/openwork-server.ts
   Typed renderer client
 
 apps/app/src/react-app/domains/portfolio/
-  Portfolio page and workspace selector
+  Portfolio page, workspace selector, and shared research-history view
 
 apps/app/src/react-app/shell/workspace-routes.ts
 apps/app/src/react-app/shell/session-route.tsx
@@ -286,7 +320,8 @@ pnpm --filter @openwork/app exec bun test \
   tests/portfolio-client.test.ts \
   tests/portfolio-navigation.test.ts \
   tests/portfolio-tree.test.ts \
-  tests/portfolio-workspace-selector.test.tsx
+  tests/portfolio-workspace-selector.test.tsx \
+  tests/portfolio-research-history.test.tsx
 pnpm --filter @openwork/app typecheck
 ```
 
@@ -305,5 +340,7 @@ The original design and execution plan remain useful historical context:
 
 - [`docs/superpowers/specs/2026-08-16-local-portfolio-workspace-design.md`](../docs/superpowers/specs/2026-08-16-local-portfolio-workspace-design.md)
 - [`docs/superpowers/plans/2026-08-16-local-portfolio-workspace.md`](../docs/superpowers/plans/2026-08-16-local-portfolio-workspace.md)
+- [`docs/superpowers/specs/2026-08-17-generic-portfolio-research-history-design.md`](../docs/superpowers/specs/2026-08-17-generic-portfolio-research-history-design.md)
+- [`docs/superpowers/plans/2026-08-17-generic-portfolio-research-history.md`](../docs/superpowers/plans/2026-08-17-generic-portfolio-research-history.md)
 
 Those files describe intent and planned sequencing. This document describes the current implemented behavior and should be updated when the Portfolio contract changes.

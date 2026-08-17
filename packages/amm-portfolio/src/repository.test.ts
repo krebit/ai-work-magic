@@ -120,6 +120,9 @@ describe("portfolio projects and relationships", () => {
 
     const relationship = repo.createRelationship({ sourceProjectId: target.id, targetProjectId: source.id, type: "adaptation-of" });
     assert.equal(relationship.type, "adaptation-of");
+    const research = repo.createProject({ idempotencyKey: "research", title: "Audience study", kind: "research", vertical: "marketing", lifecycleStage: "research" });
+    const informed = repo.createRelationship({ sourceProjectId: research.id, targetProjectId: source.id, type: "informed" });
+    assert.equal(informed.type, "informed");
     assert.throws(() => repo.createRelationship({ sourceProjectId: source.id, targetProjectId: source.id, type: "companion-to" }), { message: "relationship_self_reference" });
     assert.throws(() => repo.createRelationship({ sourceProjectId: target.id, targetProjectId: source.id, type: "adaptation-of" }), { message: "relationship_exists" });
     assert.throws(() => repo.createRelationship({ sourceProjectId: "missing", targetProjectId: source.id, type: "derived-from" }), { message: "project_not_found" });

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startServer } from "./server.js";
@@ -45,7 +45,7 @@ describe("portfolio API", () => {
   });
 
   test("creates and updates generic projects", async () => {
-    const { base, headers } = await setup();
+    const { root, base, headers } = await setup();
     await fetch(`${base}/workspace/ws_1/portfolio`, { method: "POST", headers, body: JSON.stringify({ name: "Mixed Studio" }) });
     const createdResponse = await fetch(`${base}/workspace/ws_1/portfolio/projects`, { method: "POST", headers, body: JSON.stringify({ idempotencyKey: "project-1", title: "Moon Harbor", kind: "series", vertical: "short-drama", lifecycleStage: "planning" }) });
     expect(createdResponse.status).toBe(201);
@@ -58,7 +58,7 @@ describe("portfolio API", () => {
   });
 
   test("records a complete research history through authenticated workspace routes", async () => {
-    const { base, headers } = await setup();
+    const { root: workspaceRoot, base, headers } = await setup();
     await fetch(`${base}/workspace/ws_1/portfolio`, { method: "POST", headers, body: JSON.stringify({ name: "Research Studio" }) });
     const projectResponse = await fetch(`${base}/workspace/ws_1/portfolio/projects`, { method: "POST", headers, body: JSON.stringify({ idempotencyKey: "research-project", title: "Camping journals", kind: "research", vertical: "amazon-kdp", lifecycleStage: "research" }) });
     const project = await projectResponse.json() as { id: string };
@@ -71,6 +71,11 @@ describe("portfolio API", () => {
     const snapshotResponse = await fetch(`${root}/snapshots`, { method: "POST", headers, body: JSON.stringify({ idempotencyKey: "snapshot", runId: run.id, state: "complete", capturedAt: "2026-08-01T00:01:00.000Z", sealedAt: "2026-08-01T00:02:00.000Z", canonicalPayload: { keyword: "camping journal" }, observations: [{ subjectType: "keyword", subjectKey: "camping journal", metric: "amazon_search_result_count", valueType: "integer", canonicalValue: 1200, provider: "fixture", observedAt: "2026-08-01T00:01:00.000Z" }] }) });
     expect(snapshotResponse.status).toBe(201);
     const snapshot = await snapshotResponse.json() as { id: string };
+    await writeFile(join(workspaceRoot, "evidence.json"), "{}");
+    const artifactResponse = await fetch(`${base}/workspace/ws_1/portfolio/artifacts`, { method: "POST", headers, body: JSON.stringify({ path: "evidence.json", projectId: project.id, role: "research-evidence" }) });
+    const artifact = await artifactResponse.json() as { id: string; versions: Array<{ id: string }> };
+    const evidenceResponse = await fetch(`${root}/evidence`, { method: "POST", headers, body: JSON.stringify({ idempotencyKey: "evidence", snapshotId: snapshot.id, artifactId: artifact.id, artifactVersionId: artifact.versions[0]!.id, role: "provider-response", capturedAt: "2026-08-01T00:01:00.000Z" }) });
+    expect(evidenceResponse.status).toBe(201);
     const evaluationResponse = await fetch(`${root}/evaluations`, { method: "POST", headers, body: JSON.stringify({ idempotencyKey: "evaluation", snapshotId: snapshot.id, evaluationType: "keyword-opportunity", policyRef: "policy/v1", evaluationAsOf: "2026-08-01T00:02:00.000Z", requestPayload: {}, resultPayload: { score: "72.5" } }) });
     const evaluation = await evaluationResponse.json() as { id: string };
     expect(evaluationResponse.status).toBe(201);
@@ -78,6 +83,6 @@ describe("portfolio API", () => {
 
     const historyResponse = await fetch(root, { headers });
     expect(historyResponse.status).toBe(200);
-    expect(await historyResponse.json()).toMatchObject({ runs: [{ id: run.id }], snapshots: [{ id: snapshot.id }], observations: [{ metric: "amazon_search_result_count", canonicalValue: 1200 }], evaluations: [{ id: evaluation.id }], decisions: [{ decision: "accept" }] });
+    expect(await historyResponse.json()).toMatchObject({ runs: [{ id: run.id }], snapshots: [{ id: snapshot.id }], observations: [{ metric: "amazon_search_result_count", canonicalValue: 1200 }], evidence: [{ artifactVersionId: artifact.versions[0]!.id }], evaluations: [{ id: evaluation.id }], decisions: [{ decision: "accept" }] });
   });
 });

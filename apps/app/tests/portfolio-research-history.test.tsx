@@ -11,6 +11,7 @@ describe("portfolio research history", () => {
         { id: "obs_1", snapshotId: "snap_1", subjectType: "keyword", subjectKey: "keyword:cozy mystery", metric: "search_results", valueType: "integer", canonicalValue: 1200, unit: "results", provider: "amazon", providerVersion: null, evidenceRefs: [], observationDigest: "obs1", observedAt: "2026-08-01T10:03:00.000Z" },
         { id: "obs_2", snapshotId: "snap_2", subjectType: "keyword", subjectKey: "keyword:cozy mystery", metric: "search_results", valueType: "integer", canonicalValue: 900, unit: "results", provider: "amazon", providerVersion: null, evidenceRefs: [], observationDigest: "obs2", observedAt: "2026-08-08T10:03:00.000Z" },
       ],
+      evidence: [],
       evaluations: [],
       decisions: [{ id: "dec_1", projectId: "prj_1", evaluationId: null, decision: "accept", rationale: "Competition improved", selectedSubjectRefs: ["keyword:cozy mystery"], requestedFollowUp: [], actorRef: "user", decidedAt: "2026-08-08T11:00:00.000Z", supersedesDecisionId: null }],
     }} />);

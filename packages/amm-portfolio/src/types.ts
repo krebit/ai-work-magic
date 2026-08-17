@@ -16,6 +16,10 @@ export const PORTFOLIO_RELATIONSHIP_TYPES = [
   "promotion-for",
   "companion-to",
   "supersedes",
+  "informed",
+  "validated",
+  "invalidated",
+  "produced",
 ] as const;
 
 export type PortfolioLifecycleStage = (typeof PORTFOLIO_LIFECYCLE_STAGES)[number];

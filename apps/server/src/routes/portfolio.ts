@@ -20,6 +20,7 @@ const observationSchema = z.object({ subjectType: z.string().trim().min(1), subj
 const researchSnapshotSchema = researchWorkspaceSchema.extend({ runId: z.string().trim().min(1), state: z.enum(["complete", "partial", "invalid"]), capturedAt: z.string().datetime(), sealedAt: z.string().datetime(), supersedesSnapshotId: z.string().trim().min(1).optional(), canonicalPayload: z.record(z.string(), z.unknown()), diagnosticSummary: z.record(z.string(), z.unknown()).optional(), observations: z.array(observationSchema) }).strict();
 const researchEvaluationSchema = researchWorkspaceSchema.extend({ snapshotId: z.string().trim().min(1), evaluationType: z.string().trim().min(1), policyRef: z.string().trim().min(1), engineRef: z.string().trim().min(1).optional(), evaluationAsOf: z.string().datetime(), requestPayload: z.record(z.string(), z.unknown()), resultPayload: z.record(z.string(), z.unknown()) }).strict();
 const researchDecisionSchema = researchWorkspaceSchema.extend({ evaluationId: z.string().trim().min(1).optional(), decision: z.enum(["accept", "reject", "more-research"]), rationale: z.string().trim().min(1), selectedSubjectRefs: z.array(z.string()).optional(), requestedFollowUp: z.array(z.string()).optional(), actorRef: z.string().trim().min(1), decidedAt: z.string().datetime(), supersedesDecisionId: z.string().trim().min(1).optional() }).strict();
+const researchEvidenceSchema = researchWorkspaceSchema.extend({ snapshotId: z.string().trim().min(1), observationId: z.string().trim().min(1).optional(), artifactId: z.string().trim().min(1), artifactVersionId: z.string().trim().min(1), role: z.string().trim().min(1), capturedAt: z.string().datetime(), rightsClassification: z.string().trim().min(1).optional() }).strict();
 
 interface RegisterPortfolioRoutesOptions {
   routes: Route[];
@@ -191,6 +192,11 @@ export function registerPortfolioRoutes(options: RegisterPortfolioRoutesOptions)
 
   addRoute(routes, "GET", "/workspace/:id/portfolio/projects/:projectId/research/observations", "client", async (ctx) => {
     const repository = await researchRepository(ctx); try { return jsonResponse({ items: repository.listResearchObservations(ctx.params.projectId) }); } catch (error) { remap(error); } finally { repository.close(); }
+  });
+
+  addRoute(routes, "POST", "/workspace/:id/portfolio/projects/:projectId/research/evidence", "client", async (ctx) => {
+    mutate(ctx); const workspace = await resolveWorkspace(config, ctx.params.id); const body = researchEvidenceSchema.parse(await readJsonBody(ctx.request));
+    try { const repository = openPortfolioRepository(workspace.path); try { return jsonResponse(repository.linkResearchEvidence(ctx.params.projectId, body), 201); } finally { repository.close(); } } catch (error) { remap(error); }
   });
 
   addRoute(routes, "POST", "/workspace/:id/portfolio/projects/:projectId/research/evaluations", "client", async (ctx) => {

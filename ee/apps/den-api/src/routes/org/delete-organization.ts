@@ -1,5 +1,8 @@
 import { eq, inArray } from "@openwork-ee/den-db/drizzle"
 import {
+  AmmOperationTable,
+  AmmUsageBucketTable,
+  AmmUsageLedgerEntryTable,
   AuthApiKeyTable,
   AuthSessionTable,
   AuditEventTable,
@@ -499,6 +502,10 @@ export function registerDeleteOrganizationRoutes<T extends { Variables: OrgRoute
         await tx.delete(OrgSubscriptionTable).where(eq(OrgSubscriptionTable.organization_id, organizationId))
         await tx.delete(ScimUserTombstoneTable).where(eq(ScimUserTombstoneTable.organizationId, organizationId))
         await tx.delete(ScimGroupTable).where(eq(ScimGroupTable.organizationId, organizationId))
+
+        await tx.delete(AmmUsageLedgerEntryTable).where(eq(AmmUsageLedgerEntryTable.organizationId, organizationId))
+        await tx.delete(AmmOperationTable).where(eq(AmmOperationTable.organizationId, organizationId))
+        await tx.delete(AmmUsageBucketTable).where(eq(AmmUsageBucketTable.organizationId, organizationId))
 
         await tx.delete(InferenceUsageLedgerEntryTable).where(eq(InferenceUsageLedgerEntryTable.organization_id, organizationId))
         await tx.delete(InferenceKeyTable).where(eq(InferenceKeyTable.organization_id, organizationId))

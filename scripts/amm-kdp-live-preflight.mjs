@@ -27,6 +27,8 @@ export const REQUIRED_SECRETS = [
   },
 ];
 
+export const DEFAULT_PROBE_TIMEOUT_MS = 2_000;
+
 function secretStatus(name, environment) {
   const requirement = REQUIRED_SECRETS.find((candidate) => candidate.name === name);
   if (!requirement) {
@@ -39,13 +41,32 @@ function secretStatus(name, environment) {
   };
 }
 
-export async function probeEndpoint(endpoint, fetchImpl = globalThis.fetch) {
+function createTimeoutSignal(timeoutMs) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  if (typeof timeoutId.unref === "function") {
+    timeoutId.unref();
+  }
+
+  return {
+    signal: controller.signal,
+    dispose: () => clearTimeout(timeoutId),
+  };
+}
+
+export async function probeEndpoint(
+  endpoint,
+  fetchImpl = globalThis.fetch,
+  { timeoutMs = DEFAULT_PROBE_TIMEOUT_MS } = {},
+) {
+  const { signal, dispose } = createTimeoutSignal(timeoutMs);
   try {
     const response = await fetchImpl(endpoint, {
       method: "GET",
       headers: {
         Accept: "application/json",
       },
+      signal,
     });
     return {
       endpoint,
@@ -56,16 +77,19 @@ export async function probeEndpoint(endpoint, fetchImpl = globalThis.fetch) {
       endpoint,
       statusCode: null,
     };
+  } finally {
+    dispose();
   }
 }
 
 export async function runPreflight({
   environment = process.env,
   fetchImpl = globalThis.fetch,
+  probeTimeoutMs = DEFAULT_PROBE_TIMEOUT_MS,
 } = {}) {
   const endpoints = [];
   for (const endpoint of REQUIRED_ENDPOINTS) {
-    endpoints.push(await probeEndpoint(endpoint, fetchImpl));
+    endpoints.push(await probeEndpoint(endpoint, fetchImpl, { timeoutMs: probeTimeoutMs }));
   }
 
   const secrets = REQUIRED_SECRETS.map(({ name }) => secretStatus(name, environment));
@@ -102,9 +126,10 @@ export function formatPreflightReport(result) {
 export async function main({
   environment = process.env,
   fetchImpl = globalThis.fetch,
+  probeTimeoutMs = DEFAULT_PROBE_TIMEOUT_MS,
   stdout = console.log,
 } = {}) {
-  const result = await runPreflight({ environment, fetchImpl });
+  const result = await runPreflight({ environment, fetchImpl, probeTimeoutMs });
   stdout(formatPreflightReport(result));
   return result;
 }

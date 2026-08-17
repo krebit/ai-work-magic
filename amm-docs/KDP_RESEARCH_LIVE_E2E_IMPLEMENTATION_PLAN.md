@@ -802,6 +802,19 @@ git add scripts/amm-kdp-live-preflight.mjs package.json amm-docs/KDP_RESEARCH_LI
 git commit -m "test: add KDP live stack preflight"
 ```
 
+**2026-08-17 review-fix note:** `scripts/amm-kdp-live-preflight.mjs` now
+applies a bounded per-request abort timeout to every AMM/Den probe while
+preserving the existing endpoint list, `statusCode: null` catch behavior,
+secret presence-only output, and `ready`/`incomplete` exit semantics. The
+timeout is injectable through `probeTimeoutMs` so the hanging-probe regression
+test can force an abort and verify that the printed report never includes
+secret values or raw timeout error text.
+
+Exact verification for this review fix:
+
+- `node --test scripts/amm-kdp-live-preflight.test.mjs`
+- `git diff --check`
+
 ---
 
 ### Task 9: Add the Authoritative Live Browser Spec

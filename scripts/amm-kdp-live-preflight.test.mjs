@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   formatPreflightReport,
+  main,
   runPreflight,
 } from "./amm-kdp-live-preflight.mjs";
 
@@ -93,4 +94,47 @@ test("marks unavailable dependencies incomplete instead of pretending they are h
     { endpoint: "http://127.0.0.1:8790/health", statusCode: null },
     { endpoint: "http://127.0.0.1:8790/ready", statusCode: 503 },
   ]);
+});
+
+test("aborts hanging probes, returns incomplete, and keeps timeout errors secret-safe", async () => {
+  const secretEnv = {
+    DEN_TO_AMM_SERVICE_KEY: "12345678901234567890123456789012",
+    DATAFORSEO_LOGIN: "dfs-login",
+    DATAFORSEO_PASSWORD: "dfs-password",
+    SERPAPI_API_KEY: "serp-secret",
+  };
+  const printed = [];
+  const secretErrorText = "timeout failure leaked secret serp-secret";
+  const preflightPromise = main({
+    environment: secretEnv,
+    probeTimeoutMs: 25,
+    fetchImpl: async (_url, options = {}) =>
+      new Promise((_resolve, reject) => {
+        options.signal?.addEventListener(
+          "abort",
+          () => reject(new Error(secretErrorText)),
+          { once: true },
+        );
+      }),
+    stdout: (value) => printed.push(value),
+  });
+  const result = await Promise.race([
+    preflightPromise,
+    new Promise((_, reject) => {
+      setTimeout(() => reject(new Error("preflight never completed")), 200);
+    }),
+  ]);
+
+  assert.equal(result.status, "incomplete");
+  assert.equal(result.exitCode, 1);
+  assert.deepEqual(result.endpoints, [
+    { endpoint: "http://127.0.0.1:3000/api/v1/health", statusCode: null },
+    { endpoint: "http://127.0.0.1:3000/api/v1/ready", statusCode: null },
+    { endpoint: "http://127.0.0.1:8790/health", statusCode: null },
+    { endpoint: "http://127.0.0.1:8790/ready", statusCode: null },
+  ]);
+  assert.equal(printed.length, 1);
+  assert.match(printed[0], /"status": "incomplete"/);
+  assert.doesNotMatch(printed[0], /serp-secret/);
+  assert.doesNotMatch(printed[0], /timeout failure leaked secret/);
 });

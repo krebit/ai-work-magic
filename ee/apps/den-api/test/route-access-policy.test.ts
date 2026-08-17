@@ -16,6 +16,7 @@ const accessPolicyMarkers = [
   "tokenRoute",
   "cloudTransportRoute",
   "delegatedRoute",
+  "authenticateRunner",
 ]
 
 type RouteCall = {
@@ -31,17 +32,35 @@ function listTypeScriptFiles(directory: string): string[] {
       return listTypeScriptFiles(entryPath)
     }
 
-    return entry.isFile() && entry.name.endsWith(".ts") ? [entryPath] : []
+    return entry.isFile() && entry.name.endsWith(".ts") && !entry.name.endsWith(".test.ts")
+      ? [entryPath]
+      : []
   })
 }
 
-function findMatchingParen(source: string, openParenIndex: number) {
+function findMatchingParen(source: string, openParenIndex: number, filePath: string) {
   let depth = 0
   let quote: string | null = null
   let escaped = false
+  let lineComment = false
+  let blockComment = false
 
   for (let index = openParenIndex; index < source.length; index += 1) {
     const char = source[index]
+    const next = source[index + 1]
+
+    if (lineComment) {
+      if (char === "\n") lineComment = false
+      continue
+    }
+
+    if (blockComment) {
+      if (char === "*" && next === "/") {
+        blockComment = false
+        index += 1
+      }
+      continue
+    }
 
     if (quote) {
       if (escaped) {
@@ -51,6 +70,18 @@ function findMatchingParen(source: string, openParenIndex: number) {
       } else if (char === quote) {
         quote = null
       }
+      continue
+    }
+
+    if (char === "/" && next === "/") {
+      lineComment = true
+      index += 1
+      continue
+    }
+
+    if (char === "/" && next === "*") {
+      blockComment = true
+      index += 1
       continue
     }
 
@@ -69,7 +100,8 @@ function findMatchingParen(source: string, openParenIndex: number) {
     }
   }
 
-  throw new Error("Unclosed route registration")
+  const line = source.slice(0, openParenIndex).split("\n").length
+  throw new Error(`Unclosed route registration in ${filePath}:${line}`)
 }
 
 function findNextRouteCall(source: string, startIndex: number) {
@@ -102,7 +134,7 @@ function findRouteCalls(filePath: string): RouteCall[] {
     }
 
     const openParenIndex = source.indexOf("(", route.index)
-    const closeParenIndex = findMatchingParen(source, openParenIndex)
+    const closeParenIndex = findMatchingParen(source, openParenIndex, filePath)
     const call = source.slice(route.index, closeParenIndex + 1)
     const line = source.slice(0, route.index).split("\n").length
     calls.push({ filePath, line, call })
@@ -124,5 +156,15 @@ describe("Den API route access policies", () => {
       .find((route) => route.call.includes('"/v1/telemetry/analytics"'))
 
     expect(analyticsRoute?.call).toContain('orgRoleRoute(["admin"])')
+  })
+
+  test("every AMM research route requires organization membership", () => {
+    const ammRoutePath = join(srcRoot, "routes/amm/index.ts")
+    const ammRouteSource = readFileSync(ammRoutePath, "utf8")
+    const ammRoutes = findRouteCalls(ammRoutePath)
+
+    expect(ammRoutes).toHaveLength(5)
+    expect(ammRouteSource).toContain("const orgMemberRouteMiddleware = options.memberRoute ?? orgMemberRoute()")
+    expect(ammRoutes.every((route) => route.call.includes("orgMemberRouteMiddleware,"))).toBe(true)
   })
 })

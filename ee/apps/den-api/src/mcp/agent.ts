@@ -47,6 +47,7 @@ import {
   externalCapabilityErrorToolResult,
   externalCapabilitySuccessToolResult,
   searchCapabilityRegistry,
+  type CapabilityRegistryContext,
   type ExecuteCapabilityToolResult,
 } from "./capability-registry.js"
 import { runCodemodeScript } from "./codemode-run.js"
@@ -314,6 +315,47 @@ export function createAgentMcpServer(): McpServer {
   })
 }
 
+export function registerAgentExecuteCapabilityTool(input: {
+  server: McpServer
+  catalog: Awaited<ReturnType<typeof getCatalog>>
+  capabilityContext: CapabilityRegistryContext
+}) {
+  input.server.registerTool(
+    EXECUTE_CAPABILITY_TOOL_NAME,
+    {
+      title: "Execute capability",
+      description: [
+        "Call a capability found via search_capabilities, by its exact name.",
+        "Pass path/query/body only as described by that match's pathParams/queryParams/hasBody.",
+        "For external MCP capabilities, provider-advertised schema mismatches are returned as advisory schemaGuidance alongside the provider result; they do not block the downstream call.",
+        "For skill capabilities listed in the remote skill catalog, this returns their authorized SKILL.md content.",
+        "Returns unknown_capability if name doesn't match a current capability — call search_capabilities again.",
+      ].join(" "),
+      annotations: EXECUTE_CAPABILITY_ANNOTATIONS,
+      _meta: { ui: { visibility: ["model", "app"] } },
+      inputSchema: z.object({
+        name: z.string().min(1).describe("The exact tool name returned by search_capabilities."),
+        schemaDigest: z.string().regex(/^sha256:[a-f0-9]{64}$/).optional().describe("For an external MCP match, copy the exact schemaDigest returned by search_capabilities so schema drift can be reported as advisory guidance without blocking the provider call."),
+        path: z.union([z.record(z.string(), z.unknown()), z.string()]).optional().describe("Path parameters, only if the match's pathParams is non-empty."),
+        query: z.union([z.record(z.string(), z.unknown()), z.string()]).optional().describe("Query parameters, only if the match's queryParams is non-empty."),
+        body: z.unknown().optional().describe("For native API capabilities, the JSON body. For external MCP capabilities, the arguments object matching argumentsSchema."),
+      }),
+    },
+    async ({ name, schemaDigest, path, query, body }, extra) => {
+      const result = await executeCapabilityWithBudget({
+        capability: name,
+        invoke: () => executeCapability(input.capabilityContext, { name, schemaDigest, path, query, body }),
+      })
+      const catalogOperation = input.catalog.find((operation) => operation.name === name)
+      if (!result.isError && catalogOperation && catalogOperationChangesRemoteMcpAppDiscovery(catalogOperation)) {
+        await extra.sendNotification({ method: "notifications/tools/list_changed" })
+        await extra.sendNotification({ method: "notifications/resources/list_changed" })
+      }
+      return result
+    },
+  )
+}
+
 export function registerAgentSkillResources(input: {
   server: McpServer
   skills: RemoteSkillDescriptor[]
@@ -559,40 +601,7 @@ export function registerAgentMcpRoutes<T extends { Variables: RequestIdVariables
       },
     )
 
-    server.registerTool(
-      EXECUTE_CAPABILITY_TOOL_NAME,
-      {
-        title: "Execute capability",
-        description: [
-          "Call a capability found via search_capabilities, by its exact name.",
-          "Pass path/query/body only as described by that match's pathParams/queryParams/hasBody.",
-          "For external MCP capabilities, provider-advertised schema mismatches are returned as advisory schemaGuidance alongside the provider result; they do not block the downstream call.",
-          "For skill capabilities listed in the remote skill catalog, this returns their authorized SKILL.md content.",
-          "Returns unknown_capability if name doesn't match a current capability — call search_capabilities again.",
-        ].join(" "),
-        annotations: EXECUTE_CAPABILITY_ANNOTATIONS,
-        _meta: { ui: { visibility: ["model", "app"] } },
-        inputSchema: z.object({
-          name: z.string().min(1).describe("The exact tool name returned by search_capabilities."),
-          schemaDigest: z.string().regex(/^sha256:[a-f0-9]{64}$/).optional().describe("For an external MCP match, copy the exact schemaDigest returned by search_capabilities so schema drift can be reported as advisory guidance without blocking the provider call."),
-          path: z.union([z.record(z.string(), z.unknown()), z.string()]).optional().describe("Path parameters, only if the match's pathParams is non-empty."),
-          query: z.union([z.record(z.string(), z.unknown()), z.string()]).optional().describe("Query parameters, only if the match's queryParams is non-empty."),
-          body: z.unknown().optional().describe("For native API capabilities, the JSON body. For external MCP capabilities, the arguments object matching argumentsSchema."),
-        }),
-      },
-      async ({ name, schemaDigest, path, query, body }, extra) => {
-        const result = await executeCapabilityWithBudget({
-          capability: name,
-          invoke: () => executeCapability(capabilityContext, { name, schemaDigest, path, query, body }),
-        })
-        const catalogOperation = catalog.find((operation) => operation.name === name)
-        if (!result.isError && catalogOperation && catalogOperationChangesRemoteMcpAppDiscovery(catalogOperation)) {
-          await extra.sendNotification({ method: "notifications/tools/list_changed" })
-          await extra.sendNotification({ method: "notifications/resources/list_changed" })
-        }
-        return result
-      },
-    )
+    registerAgentExecuteCapabilityTool({ server, catalog, capabilityContext })
 
     if (codemodeEnabled) {
       const loadDynamicArtifact = async ({

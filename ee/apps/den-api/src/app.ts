@@ -22,6 +22,7 @@ import { appLogger } from "./observability/logger.js"
 import { createRequestAccessLogMiddleware, createTelemetryErrorSanitizerMiddleware, registerAppErrorHandler, registerObservabilityMiddleware } from "./observability/hono.js"
 import { registerAdminRoutes } from "./routes/admin/index.js"
 import { registerAuthRoutes } from "./routes/auth/index.js"
+import { registerAmmRoutes } from "./routes/amm/index.js"
 import { registerBootstrapRoutes } from "./routes/bootstrap/index.js"
 import { registerCloudRoutes } from "./routes/cloud/index.js"
 import { registerDeprecatedSkillHubRoutes } from "./routes/deprecated-skill-hubs.js"
@@ -207,6 +208,7 @@ app.get(
 )
 
 registerAdminRoutes(app)
+registerAmmRoutes(app)
 registerAuthRoutes(app)
 registerBootstrapRoutes(app)
 registerCloudRoutes(app)
@@ -329,6 +331,7 @@ app.get(
         { name: "Organizations", description: "Top-level organization creation and context routes." },
         { name: "Invitations", description: "Invitation preview, acceptance, creation, and cancellation routes." },
         { name: "API Keys", description: "Organization API key management routes." },
+        { name: "AMM Research", description: "Organization-owned managed KDP research operations." },
         { name: "SCIM", description: "Organization SCIM connector management routes." },
         { name: "SSO", description: "Organization single sign-on connector management routes." },
         { name: "Members", description: "Organization member management routes." },

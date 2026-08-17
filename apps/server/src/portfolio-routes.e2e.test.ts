@@ -56,4 +56,28 @@ describe("portfolio API", () => {
     const listed = await fetch(`${base}/workspace/ws_1/portfolio/projects`, { headers });
     expect(await listed.json()).toMatchObject({ items: [{ id: created.id, vertical: "short-drama" }] });
   });
+
+  test("records a complete research history through authenticated workspace routes", async () => {
+    const { base, headers } = await setup();
+    await fetch(`${base}/workspace/ws_1/portfolio`, { method: "POST", headers, body: JSON.stringify({ name: "Research Studio" }) });
+    const projectResponse = await fetch(`${base}/workspace/ws_1/portfolio/projects`, { method: "POST", headers, body: JSON.stringify({ idempotencyKey: "research-project", title: "Camping journals", kind: "research", vertical: "amazon-kdp", lifecycleStage: "research" }) });
+    const project = await projectResponse.json() as { id: string };
+    const root = `${base}/workspace/ws_1/portfolio/projects/${project.id}/research`;
+    expect((await fetch(root)).status).toBe(401);
+
+    const runResponse = await fetch(`${root}/runs`, { method: "POST", headers, body: JSON.stringify({ idempotencyKey: "run", researchType: "amazon-kdp.keyword-opportunity", trigger: "manual", requestPayload: { keyword: "camping journal" }, startedAt: "2026-08-01T00:00:00.000Z" }) });
+    expect(runResponse.status).toBe(201);
+    const run = await runResponse.json() as { id: string };
+    const snapshotResponse = await fetch(`${root}/snapshots`, { method: "POST", headers, body: JSON.stringify({ idempotencyKey: "snapshot", runId: run.id, state: "complete", capturedAt: "2026-08-01T00:01:00.000Z", sealedAt: "2026-08-01T00:02:00.000Z", canonicalPayload: { keyword: "camping journal" }, observations: [{ subjectType: "keyword", subjectKey: "camping journal", metric: "amazon_search_result_count", valueType: "integer", canonicalValue: 1200, provider: "fixture", observedAt: "2026-08-01T00:01:00.000Z" }] }) });
+    expect(snapshotResponse.status).toBe(201);
+    const snapshot = await snapshotResponse.json() as { id: string };
+    const evaluationResponse = await fetch(`${root}/evaluations`, { method: "POST", headers, body: JSON.stringify({ idempotencyKey: "evaluation", snapshotId: snapshot.id, evaluationType: "keyword-opportunity", policyRef: "policy/v1", evaluationAsOf: "2026-08-01T00:02:00.000Z", requestPayload: {}, resultPayload: { score: "72.5" } }) });
+    const evaluation = await evaluationResponse.json() as { id: string };
+    expect(evaluationResponse.status).toBe(201);
+    expect((await fetch(`${root}/decisions`, { method: "POST", headers, body: JSON.stringify({ idempotencyKey: "decision", evaluationId: evaluation.id, decision: "accept", rationale: "Strong evidence", actorRef: "user:test", decidedAt: "2026-08-01T00:03:00.000Z" }) })).status).toBe(201);
+
+    const historyResponse = await fetch(root, { headers });
+    expect(historyResponse.status).toBe(200);
+    expect(await historyResponse.json()).toMatchObject({ runs: [{ id: run.id }], snapshots: [{ id: snapshot.id }], observations: [{ metric: "amazon_search_result_count", canonicalValue: 1200 }], evaluations: [{ id: evaluation.id }], decisions: [{ decision: "accept" }] });
+  });
 });

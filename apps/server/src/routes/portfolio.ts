@@ -11,6 +11,15 @@ import {
 import { ApiError } from "../errors.js";
 import type { ServerConfig, TokenScope, WorkspaceInfo } from "../types.js";
 import { addRoute, type RequestContext, type Route } from "./registry.js";
+import { z } from "zod";
+
+const researchWorkspaceSchema = z.object({ idempotencyKey: z.string().trim().min(1) });
+const researchRunSchema = researchWorkspaceSchema.extend({ researchType: z.string().trim().min(1), trigger: z.string().trim().min(1), requestPayload: z.record(z.string(), z.unknown()), startedAt: z.string().datetime() }).strict();
+const researchRunCompleteSchema = researchWorkspaceSchema.extend({ status: z.enum(["completed", "partial", "failed", "cancelled"]), completedAt: z.string().datetime() }).strict();
+const observationSchema = z.object({ subjectType: z.string().trim().min(1), subjectKey: z.string().trim().min(1), metric: z.string().trim().min(1), valueType: z.enum(["string", "integer", "decimal", "boolean", "json"]), canonicalValue: z.unknown(), unit: z.string().trim().min(1).optional(), provider: z.string().trim().min(1).optional(), providerVersion: z.string().trim().min(1).optional(), observedAt: z.string().datetime(), evidenceRefs: z.array(z.string()).optional() }).strict();
+const researchSnapshotSchema = researchWorkspaceSchema.extend({ runId: z.string().trim().min(1), state: z.enum(["complete", "partial", "invalid"]), capturedAt: z.string().datetime(), sealedAt: z.string().datetime(), supersedesSnapshotId: z.string().trim().min(1).optional(), canonicalPayload: z.record(z.string(), z.unknown()), diagnosticSummary: z.record(z.string(), z.unknown()).optional(), observations: z.array(observationSchema) }).strict();
+const researchEvaluationSchema = researchWorkspaceSchema.extend({ snapshotId: z.string().trim().min(1), evaluationType: z.string().trim().min(1), policyRef: z.string().trim().min(1), engineRef: z.string().trim().min(1).optional(), evaluationAsOf: z.string().datetime(), requestPayload: z.record(z.string(), z.unknown()), resultPayload: z.record(z.string(), z.unknown()) }).strict();
+const researchDecisionSchema = researchWorkspaceSchema.extend({ evaluationId: z.string().trim().min(1).optional(), decision: z.enum(["accept", "reject", "more-research"]), rationale: z.string().trim().min(1), selectedSubjectRefs: z.array(z.string()).optional(), requestedFollowUp: z.array(z.string()).optional(), actorRef: z.string().trim().min(1), decidedAt: z.string().datetime(), supersedesDecisionId: z.string().trim().min(1).optional() }).strict();
 
 interface RegisterPortfolioRoutesOptions {
   routes: Route[];
@@ -153,5 +162,44 @@ export function registerPortfolioRoutes(options: RegisterPortfolioRoutesOptions)
     const body = await readJsonBody(ctx.request);
     try { const repository = openPortfolioRepository(workspace.path); try { return jsonResponse(repository.registerArtifact({ path: stringField(body, "path")!, role: stringField(body, "role")!, projectId: stringField(body, "projectId", true), sessionId: stringField(body, "sessionId", true) }), 201); } finally { repository.close(); } }
     catch (error) { remap(error); }
+  });
+
+  const researchRepository = async (ctx: RequestContext) => {
+    const workspace = await resolveWorkspaceWithoutBootstrap(config, ctx.params.id);
+    try { return openPortfolioRepository(workspace.path); } catch (error) { remap(error); }
+  };
+
+  addRoute(routes, "GET", "/workspace/:id/portfolio/projects/:projectId/research", "client", async (ctx) => {
+    const repository = await researchRepository(ctx);
+    try { return jsonResponse(repository.getResearchHistory(ctx.params.projectId)); } catch (error) { remap(error); } finally { repository.close(); }
+  });
+
+  addRoute(routes, "POST", "/workspace/:id/portfolio/projects/:projectId/research/runs", "client", async (ctx) => {
+    mutate(ctx); const workspace = await resolveWorkspace(config, ctx.params.id); const body = researchRunSchema.parse(await readJsonBody(ctx.request));
+    try { const repository = openPortfolioRepository(workspace.path); try { return jsonResponse(repository.createResearchRun(ctx.params.projectId, body), 201); } finally { repository.close(); } } catch (error) { remap(error); }
+  });
+
+  addRoute(routes, "PATCH", "/workspace/:id/portfolio/projects/:projectId/research/runs/:runId", "client", async (ctx) => {
+    mutate(ctx); const workspace = await resolveWorkspace(config, ctx.params.id); const body = researchRunCompleteSchema.parse(await readJsonBody(ctx.request));
+    try { const repository = openPortfolioRepository(workspace.path); try { return jsonResponse(repository.completeResearchRun(ctx.params.projectId, ctx.params.runId, body)); } finally { repository.close(); } } catch (error) { remap(error); }
+  });
+
+  addRoute(routes, "POST", "/workspace/:id/portfolio/projects/:projectId/research/snapshots", "client", async (ctx) => {
+    mutate(ctx); const workspace = await resolveWorkspace(config, ctx.params.id); const body = researchSnapshotSchema.parse(await readJsonBody(ctx.request));
+    try { const repository = openPortfolioRepository(workspace.path); try { return jsonResponse(repository.sealResearchSnapshot(ctx.params.projectId, body), 201); } finally { repository.close(); } } catch (error) { remap(error); }
+  });
+
+  addRoute(routes, "GET", "/workspace/:id/portfolio/projects/:projectId/research/observations", "client", async (ctx) => {
+    const repository = await researchRepository(ctx); try { return jsonResponse({ items: repository.listResearchObservations(ctx.params.projectId) }); } catch (error) { remap(error); } finally { repository.close(); }
+  });
+
+  addRoute(routes, "POST", "/workspace/:id/portfolio/projects/:projectId/research/evaluations", "client", async (ctx) => {
+    mutate(ctx); const workspace = await resolveWorkspace(config, ctx.params.id); const body = researchEvaluationSchema.parse(await readJsonBody(ctx.request));
+    try { const repository = openPortfolioRepository(workspace.path); try { return jsonResponse(repository.recordResearchEvaluation(ctx.params.projectId, body), 201); } finally { repository.close(); } } catch (error) { remap(error); }
+  });
+
+  addRoute(routes, "POST", "/workspace/:id/portfolio/projects/:projectId/research/decisions", "client", async (ctx) => {
+    mutate(ctx); const workspace = await resolveWorkspace(config, ctx.params.id); const body = researchDecisionSchema.parse(await readJsonBody(ctx.request));
+    try { const repository = openPortfolioRepository(workspace.path); try { return jsonResponse(repository.recordResearchDecision(ctx.params.projectId, body), 201); } finally { repository.close(); } } catch (error) { remap(error); }
   });
 }

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test"
 import {
+  ammKdpKeywordCollectionResultSchema,
   ammProviderUsageSchema,
   ammRunCancellationAcknowledgementSchema,
   ammRunAcknowledgementSchema,
@@ -24,6 +25,33 @@ const liveRequest: StartAmmKdpKeywordCollection = {
 }
 
 const prohibitedIdentityFields = ["tenantId", "organizationId", "memberId", "userId", "subscriptionId", "reservationId"]
+const validCollectionResult = {
+  schemaVersion: "amm.kdp.managed-keyword-collection.result/v1",
+  runId: "run_test",
+  completeness: "partial",
+  warnings: [{ provider: "DataForSEO", message: "search-volume cache reused" }],
+  candidates: [{
+    candidateId: "kdp-live-2026-08-17-001",
+    normalizedKeyword: "fantasy romance",
+    searchVolume: 1200,
+    totalResults: 72544,
+    products: [{
+      asin: "B012345678",
+      title: "A Book",
+      position: 1,
+      price: 12.99,
+      rating: 4.7,
+      reviewsCount: 124,
+      reviewCount: 124,
+      publicationDate: "2025-01-01",
+      booksRootBsr: 1234,
+      bsrObservations: [{ rank: 1234, scope: "books-root", label: "#1,234 in Books" }],
+    }],
+  }],
+  cacheHits: 1,
+  providerCallsAvoided: 2,
+  freshnessAsOf: "2026-08-16T12:00:00.000Z",
+} as const
 
 function expectNoProhibitedIdentityFields(value: unknown): void {
   if (Array.isArray(value)) {
@@ -155,6 +183,27 @@ describe("AMM Den contracts", () => {
         { candidateId: "duplicate", demand: 70, competition: 20 },
         { candidateId: "duplicate", demand: 60, competition: 10 },
       ],
+    }).success).toBe(false)
+  })
+
+  it("accepts the strict managed KDP collection result returned to Den", () => {
+    expect(ammKdpKeywordCollectionResultSchema.parse(validCollectionResult)).toEqual(validCollectionResult)
+  })
+
+  it("rejects KDP collection results that expose signed or identity-bearing URL fields", () => {
+    expect(ammKdpKeywordCollectionResultSchema.safeParse({
+      ...validCollectionResult,
+      candidates: [{
+        ...validCollectionResult.candidates[0],
+        products: [{
+          ...validCollectionResult.candidates[0].products[0],
+          detailPageUrl: "https://example.invalid/product?X-Amz-Signature=secret",
+        }],
+      }],
+    }).success).toBe(false)
+    expect(ammKdpKeywordCollectionResultSchema.safeParse({
+      ...validCollectionResult,
+      tenantId: "tenant-private",
     }).success).toBe(false)
   })
 })

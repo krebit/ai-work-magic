@@ -7,6 +7,7 @@ import { z } from "zod"
 import { AmmClientError, AmmResearchClient } from "../../amm/client.js"
 import {
   ammKeywordObservationQuerySchema,
+  parseAmmRunResponse,
   ammProviderUsageSchema,
   ammOperationParamsSchema,
   ammRunResponseSchema,
@@ -240,6 +241,12 @@ function routeFailure(error: unknown): {
   return null
 }
 
+function validateRunResponse(response: unknown) {
+  const parsed = parseAmmRunResponse(response)
+  if (!parsed.success) throw new AmmClientError("amm_invalid_response")
+  return parsed.data
+}
+
 function publicRunResponse(input: {
   operationId: DenTypeId<"ammOperation">
   result: unknown
@@ -404,7 +411,9 @@ export function registerAmmRoutes<T extends { Variables: AmmRouteVariables }>(
         })
         if (!operation) throw new Error("AMM operation disappeared after reservation")
         if (operation.ammRunId) {
-          const run = await client.getRun(operation.ammRunId, { requestId: c.get("requestId") })
+          const run = validateRunResponse(
+            await client.getRun(operation.ammRunId, { requestId: c.get("requestId") }),
+          )
           await reconcileTerminalRun({
             organizationId: organization.organization.id,
             operation,
@@ -430,7 +439,9 @@ export function registerAmmRoutes<T extends { Variables: AmmRouteVariables }>(
         })
         if (!attached) throw new AmmServiceError("amm_operation_state_conflict")
         if (terminalRunStates.has(run.state)) {
-          const terminalRun = await client.getRun(run.runId, { requestId: c.get("requestId") })
+          const terminalRun = validateRunResponse(
+            await client.getRun(run.runId, { requestId: c.get("requestId") }),
+          )
           await reconcileTerminalRun({
             organizationId: organization.organization.id,
             operation: attached,
@@ -495,7 +506,9 @@ export function registerAmmRoutes<T extends { Variables: AmmRouteVariables }>(
           }))
         }
 
-        const run = await client.getRun(operation.ammRunId, { requestId: c.get("requestId") })
+        const run = validateRunResponse(
+          await client.getRun(operation.ammRunId, { requestId: c.get("requestId") }),
+        )
         await reconcileTerminalRun({ organizationId, operation, run, service })
         return c.json(publicRunResponse({
           operationId: operation.id,

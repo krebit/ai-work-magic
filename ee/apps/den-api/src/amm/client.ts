@@ -1,9 +1,9 @@
 import {
   ammKeywordObservationQuerySchema,
   ammOperationParamsSchema,
+  parseAmmRunResponse,
   ammRunAcknowledgementSchema,
   ammRunCancellationAcknowledgementSchema,
-  ammRunResponseSchema,
   scoreAmmKdpKeywordsSchema,
   startAmmKdpKeywordCollectionSchema,
   toAmmCollectionBody,
@@ -76,7 +76,7 @@ function requestTimeout(timeoutMs: number) {
 }
 
 function parseRunResponse(response: unknown) {
-  const parsed = ammRunResponseSchema.safeParse(response)
+  const parsed = parseAmmRunResponse(response)
   if (!parsed.success) throw new AmmClientError("amm_invalid_response")
   return parsed.data
 }

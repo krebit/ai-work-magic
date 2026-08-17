@@ -58,7 +58,7 @@ substitute an AMM run identifier for a Den operation identifier.
    `getAmmKdpKeywordObservations` for the same keyword and context so the
    collection result and reusable identity-free observations can be reconciled.
 7. Before local persistence, validate the returned collection payload against
-   its versioned KDP vertical contract, including
+   the real strict Den contract for the versioned KDP result, including
    `amm.kdp.managed-keyword-collection.result/v1`, and validate every selected
    observation. Reject credentials, tokens, signed query parameters, or other
    secret-bearing URLs. Never store an unvalidated provider response as a

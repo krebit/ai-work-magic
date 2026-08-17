@@ -15,6 +15,7 @@ const languageSchema = z.string().regex(/^[a-z]{2}(?:-[A-Z]{2})?$/)
 const departmentSchema = z.enum(["books", "kindle-store"])
 const targetFormatSchema = z.enum(["kindle", "paperback", "hardcover"])
 const currencySchema = z.string().regex(/^[A-Z]{3}$/)
+const publicationDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/)
 
 const publicContextSchema = z.object({
   marketplace: marketplaceSchema,
@@ -123,6 +124,94 @@ export const ammRunResponseSchema = z.object({
   usage: ammProviderUsageSchema.optional(),
   requestId: z.string().trim().min(1).max(128),
 }).strict()
+
+const ammKdpCollectionWarningSchema = z.object({
+  provider: z.string().trim().min(1).max(128),
+  message: z.string().trim().min(1).max(500),
+}).strict()
+
+const ammKdpCollectionBsrObservationSchema = z.object({
+  rank: z.number().int().positive().max(10_000_000),
+  scope: z.enum(["books-root", "kindle-root", "category"]),
+  label: z.string().trim().min(1).max(500),
+  category: z.string().trim().min(1).max(500).optional(),
+}).strict()
+
+const ammKdpCollectionProductSchema = z.object({
+  asin: z.string().trim().min(1).max(32),
+  title: z.string().trim().min(1).max(1_000).optional(),
+  position: z.number().int().positive().max(1_000).optional(),
+  price: z.number().min(0).max(100_000).optional(),
+  rating: z.number().min(0).max(5).optional(),
+  reviewsCount: z.number().int().min(0).max(2_147_483_647).optional(),
+  reviewCount: z.number().int().min(0).max(2_147_483_647).optional(),
+  publicationDate: publicationDateSchema.optional(),
+  booksRootBsr: z.number().int().positive().max(10_000_000).nullable().optional(),
+  bsrObservations: z.array(ammKdpCollectionBsrObservationSchema).max(20).optional(),
+}).strict()
+
+const ammKdpCollectionCandidateSchema = z.object({
+  candidateId: z.string().trim().min(1).max(128),
+  normalizedKeyword: z.string().trim().min(1).max(500),
+  searchVolume: z.number().int().min(0).max(2_147_483_647).nullable().optional(),
+  totalResults: z.number().int().min(0).max(2_147_483_647).nullable().optional(),
+  products: z.array(ammKdpCollectionProductSchema).max(100).optional(),
+}).strict()
+
+export const ammKdpKeywordCollectionResultSchema = z.object({
+  schemaVersion: z.literal("amm.kdp.managed-keyword-collection.result/v1"),
+  runId: z.string().trim().min(1).max(128),
+  completeness: z.enum(["complete", "partial"]),
+  warnings: z.array(ammKdpCollectionWarningSchema).max(100).optional(),
+  candidates: z.array(ammKdpCollectionCandidateSchema).min(1).max(100),
+  cacheHits: z.number().int().min(0).max(100).optional(),
+  providerCallsAvoided: z.number().int().min(0).max(10_000).optional(),
+  freshnessAsOf: timestampSchema.optional(),
+}).strict()
+
+export function parseAmmRunResponse(response: unknown) {
+  const parsed = ammRunResponseSchema.safeParse(response)
+  if (!parsed.success) return parsed
+
+  if (
+    parsed.data.operation === "kdp.keyword-collection"
+    && (parsed.data.state === "succeeded" || parsed.data.state === "partially_succeeded")
+  ) {
+    const result = ammKdpKeywordCollectionResultSchema.safeParse(parsed.data.result)
+    if (!result.success) return result
+    if (parsed.data.state === "succeeded" && result.data.completeness !== "complete") {
+      return {
+        success: false as const,
+        error: new z.ZodError([{
+          code: "custom",
+          path: ["result", "completeness"],
+          message: "succeeded KDP collection runs must report complete completeness",
+          input: result.data.completeness,
+        }]),
+      }
+    }
+    if (parsed.data.state === "partially_succeeded" && result.data.completeness !== "partial") {
+      return {
+        success: false as const,
+        error: new z.ZodError([{
+          code: "custom",
+          path: ["result", "completeness"],
+          message: "partially_succeeded KDP collection runs must report partial completeness",
+          input: result.data.completeness,
+        }]),
+      }
+    }
+    return {
+      success: true as const,
+      data: {
+        ...parsed.data,
+        result: result.data,
+      },
+    }
+  }
+
+  return parsed
+}
 
 const downstreamCollectionBodySchema = z.object({
   schemaVersion: z.literal("amm.kdp.managed-keyword-collection.request/v1"),

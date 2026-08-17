@@ -47,6 +47,39 @@ const runResponse = {
   usage: { capabilityUnits: 1, providerCalls: 1, upstreamCostUsd: "0.01" },
   requestId: "amm_req_test",
 }
+const terminalRunResponse = {
+  runId: "run_test",
+  operation: "kdp.keyword-collection",
+  state: "succeeded",
+  result: {
+    schemaVersion: "amm.kdp.managed-keyword-collection.result/v1",
+    runId: "run_test",
+    completeness: "complete",
+    candidates: [{
+      candidateId: "candidate_test",
+      normalizedKeyword: "fantasy romance",
+      searchVolume: 1200,
+      totalResults: 72544,
+      products: [{
+        asin: "B012345678",
+        title: "A Book",
+        position: 1,
+        price: 12.99,
+        rating: 4.7,
+        reviewsCount: 124,
+        reviewCount: 124,
+        publicationDate: "2025-01-01",
+        booksRootBsr: 1234,
+        bsrObservations: [{ rank: 1234, scope: "books-root", label: "#1,234 in Books" }],
+      }],
+    }],
+    cacheHits: 1,
+    providerCallsAvoided: 2,
+    freshnessAsOf: "2026-08-16T12:00:00.000Z",
+  },
+  usage: { capabilityUnits: 7, providerCalls: 3, upstreamCostUsd: "1.25" },
+  requestId: "amm_req_test",
+} as const
 
 const acknowledgementResponse = {
   runId: "run_test",
@@ -214,6 +247,37 @@ describe("AmmResearchClient", () => {
       "GET /api/v1/kdp/keyword-observations?keyword=fantasy+romance&marketplace=amazon.com&freshWithinHours=24",
       "POST /api/v1/kdp/keyword-scores",
     ])
+  })
+
+  it("accepts a terminal KDP collection run only when the result matches the strict contract", async () => {
+    const acceptedClient = new AmmResearchClient({
+      config,
+      fetchImpl: () => Promise.resolve(Response.json(terminalRunResponse)),
+    })
+
+    expect(await acceptedClient.getRun("run_test", { requestId: "req_test" })).toEqual(terminalRunResponse)
+
+    const rejectedClient = new AmmResearchClient({
+      config,
+      fetchImpl: () => Promise.resolve(Response.json({
+        ...terminalRunResponse,
+        result: {
+          ...terminalRunResponse.result,
+          candidates: [{
+            ...terminalRunResponse.result.candidates[0],
+            products: [{
+              ...terminalRunResponse.result.candidates[0].products[0],
+              detailPageUrl: "https://example.invalid/product?X-Amz-Signature=secret",
+            }],
+          }],
+        },
+      })),
+    })
+
+    await expectAmmRejection(
+      rejectedClient.getRun("run_test", { requestId: "req_test" }),
+      "amm_invalid_response",
+    )
   })
 
   it("maps remote failures to stable errors without exposing the service key", async () => {

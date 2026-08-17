@@ -683,6 +683,19 @@ git commit -m "feat: install KDP niche research skill"
 
 Do not add `.opencode/package-lock.json`, `.amm/`, or `portfolio.yaml` unless the user separately requests those existing changes.
 
+**2026-08-17 review-fix note:** The Den-side strict validator for
+`amm.kdp.managed-keyword-collection.result/v1` is now required before terminal
+KDP collection results are exposed or reconciled. Exact verification for this
+review fix:
+
+- `pnpm --dir /home/alerios/Tech/ai-agents/ai-work-magic --filter @openwork-ee/den-api exec bun test src/amm/contracts.test.ts`
+- `pnpm --dir /home/alerios/Tech/ai-agents/ai-work-magic --filter @openwork-ee/den-api exec bun test src/routes/amm/index.test.ts`
+- `pnpm --dir /home/alerios/Tech/ai-agents/ai-work-magic --filter @openwork-ee/den-api exec bun test src/amm/client.test.ts --test-name-pattern "terminal KDP collection"`
+- `pnpm --dir /home/alerios/Tech/ai-agents/ai-work-magic --filter @openwork-ee/den-api exec tsc -p tsconfig.json --noEmit --pretty false`
+- `node /home/alerios/Tech/ai-agents/ai-money-magic/scripts/build-distributions.mjs`
+- `node /home/alerios/Tech/ai-agents/ai-money-magic/scripts/build-distributions.mjs --check`
+- `node /home/alerios/Tech/ai-agents/ai-money-magic/scripts/validate-metadata.mjs` still fails with the unchanged pre-existing unresolved dependency `amm.capability.social-research` in `verticals/kdp-niche-research/amm.package.yaml`
+
 ---
 
 ### Task 8: Add a Secret-Safe Local Full-Stack Launch and Preflight

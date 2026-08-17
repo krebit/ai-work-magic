@@ -65,6 +65,57 @@ function deferred<T>(): Deferred<T> {
 const now = new Date("2026-08-17T12:00:00.000Z")
 const windowStart = new Date("2026-08-17T00:00:00.000Z")
 const windowEnd = new Date("2026-08-18T00:00:00.000Z")
+const terminalCollectionResult = {
+  schemaVersion: "amm.kdp.managed-keyword-collection.result/v1",
+  runId: "run-terminal",
+  completeness: "complete",
+  candidates: [{
+    candidateId: "candidate_test",
+    normalizedKeyword: "fantasy romance",
+    searchVolume: 1200,
+    totalResults: 72544,
+    products: [{
+      asin: "B012345678",
+      title: "A Book",
+      position: 1,
+      price: 12.99,
+      rating: 4.7,
+      reviewsCount: 124,
+      reviewCount: 124,
+      publicationDate: "2025-01-01",
+      booksRootBsr: 1234,
+      bsrObservations: [{ rank: 1234, scope: "books-root", label: "#1,234 in Books" }],
+    }],
+  }],
+  cacheHits: 1,
+  providerCallsAvoided: 2,
+  freshnessAsOf: "2026-08-16T12:00:00.000Z",
+} as const
+const publicTerminalCollectionResult = {
+  schemaVersion: "amm.kdp.managed-keyword-collection.result/v1",
+  completeness: "complete",
+  candidates: [{
+    candidateId: "candidate_test",
+    normalizedKeyword: "fantasy romance",
+    searchVolume: 1200,
+    totalResults: 72544,
+    products: [{
+      asin: "B012345678",
+      title: "A Book",
+      position: 1,
+      price: 12.99,
+      rating: 4.7,
+      reviewsCount: 124,
+      reviewCount: 124,
+      publicationDate: "2025-01-01",
+      booksRootBsr: 1234,
+      bsrObservations: [{ rank: 1234, scope: "books-root", label: "#1,234 in Books" }],
+    }],
+  }],
+  cacheHits: 1,
+  providerCallsAvoided: 2,
+  freshnessAsOf: "2026-08-16T12:00:00.000Z",
+} as const
 
 function acknowledgeRun(run: AmmRunResponse): AmmRunAcknowledgement {
   return ammRunAcknowledgementSchema.parse({
@@ -346,11 +397,7 @@ class AmmWitness {
     this.runs.set(idempotencyKey, {
       ...run,
       state: "succeeded",
-      result: {
-        answer: "ranked evidence",
-        runId: run.runId,
-        tenant_id: "tenant-private",
-      },
+      result: { ...terminalCollectionResult, runId: run.runId },
       ...(usage ? { usage } : {}),
     })
   }
@@ -621,7 +668,7 @@ describe("AMM native routes", () => {
     expect(recovered).toEqual({
       operationId,
       state: "succeeded",
-      result: { answer: "ranked evidence" },
+      result: publicTerminalCollectionResult,
       usage: { capabilityUnits: 7, providerCalls: 3, upstreamCostUsd: "1.25" },
     })
     expect(witness.startCalls).toHaveLength(2)
@@ -700,7 +747,7 @@ describe("AMM native routes", () => {
     expect(await firstRetry.json()).toEqual({
       operationId: witness.startCalls[0]?.idempotencyKey,
       state: "succeeded",
-      result: { answer: "ranked evidence" },
+      result: publicTerminalCollectionResult,
       usage: { capabilityUnits: 7, providerCalls: 3, upstreamCostUsd: "1.25" },
     })
     expect(await secondRetry.json()).toEqual({ error: "amm_operation_state_conflict" })
@@ -883,7 +930,7 @@ describe("AMM native routes", () => {
     expect(firstPayload).toEqual({
       operationId: started.operationId,
       state: "succeeded",
-      result: { answer: "ranked evidence" },
+      result: publicTerminalCollectionResult,
       usage: { capabilityUnits: 7, providerCalls: 3, upstreamCostUsd: "1.25" },
     })
     expect(JSON.stringify(firstPayload)).not.toContain("run-")
@@ -943,6 +990,43 @@ describe("AMM native routes", () => {
     expect([...store.operations.values()][0]?.state).toBe("running")
     expect([...store.buckets.values()][0]?.reservedUnits).toBe(20)
     expect(reconciliationCalls).toBe(0)
+  })
+
+  it("rejects a terminal KDP result that includes a signed URL field", async () => {
+    const { service, store } = serviceWithBucket()
+    const witness = new AmmWitness()
+    const app = routeApp({ client: witness, context: organizationContext(), service })
+    const startedResponse = await postJson(app, "/v1/amm/kdp/keyword-collections", startBody())
+    const started: unknown = await startedResponse.json()
+    if (!isRecord(started) || typeof started.operationId !== "string") throw new Error("missing Den operation ID")
+    const idempotencyKey = witness.startCalls[0]?.idempotencyKey
+    if (!idempotencyKey) throw new Error("missing downstream idempotency key")
+    const run = witness.runs.get(idempotencyKey)
+    if (!run) throw new Error("missing witness run")
+    witness.runs.set(idempotencyKey, {
+      ...run,
+      state: "succeeded",
+      result: {
+        ...terminalCollectionResult,
+        runId: run.runId,
+        candidates: [{
+          ...terminalCollectionResult.candidates[0],
+          products: [{
+            ...terminalCollectionResult.candidates[0].products[0],
+            detailPageUrl: "https://example.invalid/product?X-Amz-Signature=secret",
+          }],
+        }],
+      },
+      usage: { capabilityUnits: 7, providerCalls: 3, upstreamCostUsd: "1.25" },
+    })
+
+    const response = await app.request(`http://den-api.local/v1/amm/operations/${started.operationId}`)
+
+    expect(response.status).toBe(502)
+    expect(await response.json()).toEqual({ error: "amm_invalid_response" })
+    expect(store.ledgerEntries.size).toBe(0)
+    expect([...store.operations.values()][0]?.state).toBe("running")
+    expect([...store.buckets.values()][0]?.reservedUnits).toBe(20)
   })
 
   it("returns observations without customer or downstream run linkage", async () => {

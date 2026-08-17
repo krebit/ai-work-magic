@@ -1,5 +1,8 @@
-import { and, eq, inArray } from "@openwork-ee/den-db/drizzle"
+import { and, eq, gt, inArray, lte } from "@openwork-ee/den-db/drizzle"
 import {
+  AmmOperationTable,
+  AmmUsageBucketTable,
+  AmmUsageLedgerEntryTable,
   AuthUserTable,
   ConfigObjectAccessGrantTable,
   ConfigObjectTable,
@@ -327,6 +330,9 @@ async function ensureOrganization(ownerUserId: UserId): Promise<OrganizationId> 
       source: "den-api seed:demo-org",
       updatedAt: new Date().toISOString(),
     },
+    features: {
+      ammResearch: true,
+    },
     limits: {
       members: 100,
       workers: 0,
@@ -366,6 +372,31 @@ async function ensureOrganization(ownerUserId: UserId): Promise<OrganizationId> 
   await ensureDefaultDesktopPolicyForOrganization({
     organizationId: id,
     createdByOrgMemberId: ownerMemberId,
+  })
+  return id
+}
+
+async function ensureDemoAmmUsageBucket(organizationId: OrganizationId) {
+  const now = new Date()
+  const currentBucket = await db
+    .select({ id: AmmUsageBucketTable.id })
+    .from(AmmUsageBucketTable)
+    .where(and(
+      eq(AmmUsageBucketTable.organizationId, organizationId),
+      lte(AmmUsageBucketTable.windowStartAt, now),
+      gt(AmmUsageBucketTable.windowEndAt, now),
+    ))
+    .limit(1)
+
+  if (currentBucket[0]) return currentBucket[0].id
+
+  const id = createDenTypeId("ammUsageBucket")
+  await db.insert(AmmUsageBucketTable).values({
+    id,
+    limitUnits: 100,
+    organizationId,
+    windowEndAt: new Date(now.getTime() + 1000 * 60 * 60 * 24 * 30),
+    windowStartAt: now,
   })
   return id
 }
@@ -951,6 +982,9 @@ async function resetDemoOrg() {
     await db.delete(MarketplaceAccessGrantTable).where(inArray(MarketplaceAccessGrantTable.marketplaceId, marketplaceIds))
     await db.delete(MarketplaceTable).where(inArray(MarketplaceTable.id, marketplaceIds))
   }
+  await db.delete(AmmUsageLedgerEntryTable).where(eq(AmmUsageLedgerEntryTable.organizationId, orgId))
+  await db.delete(AmmOperationTable).where(eq(AmmOperationTable.organizationId, orgId))
+  await db.delete(AmmUsageBucketTable).where(eq(AmmUsageBucketTable.organizationId, orgId))
   await db.delete(OrgSubscriptionTable).where(eq(OrgSubscriptionTable.organization_id, orgId))
   await db.delete(InvitationTable).where(eq(InvitationTable.organizationId, orgId))
   await db.delete(TeamMemberTable).where(inArray(TeamMemberTable.teamId, (await db.select({ id: TeamTable.id }).from(TeamTable).where(eq(TeamTable.organizationId, orgId))).map((r) => r.id)))
@@ -1061,6 +1095,8 @@ async function main() {
   log("…", "creating organization")
   const organizationId = await ensureOrganization(ownerUserId)
   log("✓", `org: ${organizationId}`)
+  await ensureDemoAmmUsageBucket(organizationId)
+  log("✓", "100-unit AMM research bucket")
   console.log()
 
   log("…", `seeding ${demoPeople.length} users and teams`)

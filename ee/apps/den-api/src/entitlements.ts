@@ -12,10 +12,10 @@ export type OrganizationPlan = {
   grandfatheredAt?: string
 }
 
-export const ENTITLEMENT_KEYS = ["sso", "desktopPolicies", "orgControls", "analytics"] as const
+export const ENTITLEMENT_KEYS = ["sso", "desktopPolicies", "orgControls", "analytics", "ammResearch"] as const
 export type EntitlementKey = (typeof ENTITLEMENT_KEYS)[number]
 
-export type OrganizationEntitlements = Record<EntitlementKey, boolean>
+export type OrganizationEntitlements = Record<Exclude<EntitlementKey, "ammResearch">, boolean>
 
 export type EnterprisePlanRequiredError = {
   error: "enterprise_plan_required"
@@ -28,6 +28,7 @@ const ENTITLEMENT_FEATURE_LABELS: Record<EntitlementKey, string> = {
   desktopPolicies: "Desktop policies",
   orgControls: "Enforced SSO and desktop version controls",
   analytics: "Usage analytics",
+  ammResearch: "AMM managed research",
 }
 
 type MetadataInput = Record<string, unknown> | string | null | undefined
@@ -55,6 +56,11 @@ function parseMetadata(input: MetadataInput): Record<string, unknown> {
   }
 
   return isRecord(input) ? input : {}
+}
+
+function hasAmmResearchEntitlement(metadata: MetadataInput) {
+  const features = parseMetadata(metadata).features
+  return isRecord(features) && features.ammResearch === true
 }
 
 function isPlanTier(value: unknown): value is PlanTier {
@@ -96,7 +102,11 @@ export function checkEntitlement(
   key: EntitlementKey,
   options: EntitlementOptions = {},
 ): { ok: true } | { ok: false; status: 402; response: EnterprisePlanRequiredError } {
-  if (getOrganizationEntitlements(metadata, options)[key]) {
+  const entitled = key === "ammResearch"
+    ? hasAmmResearchEntitlement(metadata)
+    : getOrganizationEntitlements(metadata, options)[key]
+
+  if (entitled) {
     return { ok: true }
   }
 

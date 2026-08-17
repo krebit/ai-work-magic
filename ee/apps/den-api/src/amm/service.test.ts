@@ -304,6 +304,34 @@ describe("AMM operation ownership and usage", () => {
     expect(store.buckets.get(bucket.id)?.reservedUnits).toBe(0)
   })
 
+  it("returns the completed operation for an identical same-key retry", async () => {
+    const { bucket, service, store } = serviceWithBucket()
+    const operation = await service.reserveAmmOperation(reservation())
+    await service.beginAmmOperationStart({
+      organizationId: organizationA,
+      operationId: operation.id,
+    })
+    await service.attachAmmRun({
+      organizationId: organizationA,
+      operationId: operation.id,
+      ammRunId: "run_completed",
+    })
+    const completed = await service.reconcileAmmOperation({
+      organizationId: organizationA,
+      operationId: operation.id,
+      actualUnits: 4,
+      providerCalls: 2,
+      upstreamCostUsd: "1.25",
+    })
+
+    const retried = await service.reserveAmmOperation(reservation())
+
+    expect(retried).toEqual(completed)
+    expect(store.operations.size).toBe(1)
+    expect(store.buckets.get(bucket.id)?.reservedUnits).toBe(0)
+    expect(store.buckets.get(bucket.id)?.usedUnits).toBe(4)
+  })
+
   it("returns a conflict for the same key with a different digest", async () => {
     const { bucket, service, store } = serviceWithBucket()
     await service.reserveAmmOperation(reservation())

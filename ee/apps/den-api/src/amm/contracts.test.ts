@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test"
 import {
+  ammProviderUsageSchema,
   ammRunAcknowledgementSchema,
   startAmmKdpKeywordCollectionSchema,
   toAmmCollectionBody,
@@ -112,5 +113,23 @@ describe("AMM Den contracts", () => {
       [field]: "forbidden",
     })
     expect(result.success).toBe(false)
+  })
+
+  it("rejects provider usage values that the Den accounting store cannot represent", () => {
+    expect(ammProviderUsageSchema.safeParse({
+      capabilityUnits: 1,
+      providerCalls: 2_147_483_648,
+      upstreamCostUsd: "0",
+    }).success).toBe(false)
+    expect(ammProviderUsageSchema.safeParse({
+      capabilityUnits: 1,
+      providerCalls: 1,
+      upstreamCostUsd: "1000000000000.00",
+    }).success).toBe(false)
+    expect(ammProviderUsageSchema.safeParse({
+      capabilityUnits: 1,
+      providerCalls: 1,
+      upstreamCostUsd: "1.123456789",
+    }).success).toBe(false)
   })
 })

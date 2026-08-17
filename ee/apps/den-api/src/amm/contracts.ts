@@ -84,8 +84,8 @@ export const ammKeywordObservationQuerySchema = z.object({
 
 export const ammProviderUsageSchema = z.object({
   capabilityUnits: z.number().int().min(0),
-  providerCalls: z.number().int().min(0),
-  upstreamCostUsd: z.string().regex(/^\d+(?:\.\d+)?$/),
+  providerCalls: z.number().int().min(0).max(2_147_483_647),
+  upstreamCostUsd: z.string().regex(/^(?:0|[1-9]\d{0,11})(?:\.\d{1,8})?$/),
 }).strict()
 
 export type AmmProviderUsage = z.infer<typeof ammProviderUsageSchema>

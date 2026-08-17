@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, test } from "node:test";
-import { initializePortfolio, openPortfolioRepository } from "./index";
+import { initializePortfolio, openPortfolioRepository } from "./index.js";
 
 const roots: string[] = [];
 

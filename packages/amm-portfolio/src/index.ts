@@ -1,3 +1,3 @@
-export * from "./errors";
-export * from "./repository";
-export * from "./types";
+export * from "./errors.js";
+export * from "./repository.js";
+export * from "./types.js";

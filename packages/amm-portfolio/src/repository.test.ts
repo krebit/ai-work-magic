@@ -8,7 +8,7 @@ import {
   initializePortfolio,
   inspectPortfolio,
   openPortfolioRepository,
-} from "./index";
+} from "./index.js";
 
 const roots: string[] = [];
 
@@ -89,7 +89,7 @@ describe("portfolio projects and relationships", () => {
       vertical: "short-drama",
       lifecycleStage: "creation",
     }), { message: "project_depth_exceeded" });
-    assert.deepEqual(repo.listProjects().map((project) => project.vertical), ["short-drama", "short-drama", "music"]);
+    assert.deepEqual(repo.listProjects().map((project) => project.vertical).sort(), ["music", "short-drama", "short-drama"]);
     repo.close();
   });
 

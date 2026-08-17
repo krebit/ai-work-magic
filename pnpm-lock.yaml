@@ -379,6 +379,9 @@ importers:
       '@opencode-ai/sdk':
         specifier: ^1.18.15
         version: 1.18.18
+      '@openwork/amm-portfolio':
+        specifier: workspace:*
+        version: link:../../packages/amm-portfolio
       '@openwork/enterprise-mcp-client':
         specifier: workspace:*
         version: link:../../packages/enterprise-mcp-client

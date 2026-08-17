@@ -1,10 +1,10 @@
-import Database from "better-sqlite3";
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { extname, isAbsolute, join, relative, resolve } from "node:path";
 import { parse, stringify } from "yaml";
-import { PortfolioError } from "./errors";
-import { PORTFOLIO_SCHEMA } from "./schema";
+import { PortfolioError } from "./errors.js";
+import { PORTFOLIO_SCHEMA } from "./schema.js";
+import { createSqliteDatabase, type SqliteDatabase } from "./sqlite.js";
 import type {
   CreateProjectInput,
   CreateRelationshipInput,
@@ -21,7 +21,7 @@ import type {
   ArtifactFilters,
   PortfolioSnapshot,
   UpdateProjectInput,
-} from "./types";
+} from "./types.js";
 
 const manifestName = "portfolio.yaml";
 const databasePath = (root: string) => join(root, ".amm", "portfolio.sqlite");
@@ -47,7 +47,7 @@ function rowProject(row: Record<string, string | number | null>): PortfolioProje
 }
 
 export class PortfolioRepository {
-  constructor(private readonly database: Database.Database, private readonly root: string) {}
+  constructor(private readonly database: SqliteDatabase, private readonly root: string) {}
 
   close(): void { this.database.close(); }
 
@@ -203,8 +203,8 @@ export class PortfolioRepository {
 export function openPortfolioRepository(root: string): PortfolioRepository {
   const path = databasePath(root);
   if (!existsSync(path)) throw new PortfolioError("portfolio_uninitialized");
-  const database = new Database(path);
-  database.pragma("foreign_keys = ON");
+  const database = createSqliteDatabase(path);
+  database.exec("PRAGMA foreign_keys = ON");
   return new PortfolioRepository(database, root);
 }
 
@@ -224,10 +224,11 @@ export function initializePortfolio(root: string, input: InitializePortfolioInpu
   const manifest = join(root, manifestName);
   const temporaryManifest = `${manifest}.${randomUUID()}.tmp`;
   mkdirSync(amm, { recursive: true });
-  const database = new Database(databasePath(root));
+  const database = createSqliteDatabase(databasePath(root));
+  let databaseOpen = true;
   try {
-    database.pragma("journal_mode = WAL");
-    database.pragma("foreign_keys = ON");
+    database.exec("PRAGMA journal_mode = WAL");
+    database.exec("PRAGMA foreign_keys = ON");
     database.exec(PORTFOLIO_SCHEMA);
     const id = randomUUID();
     const now = new Date().toISOString();
@@ -237,10 +238,11 @@ export function initializePortfolio(root: string, input: InitializePortfolioInpu
     return new PortfolioRepository(database, root).getSnapshot();
   } catch (error) {
     database.close();
+    databaseOpen = false;
     rmSync(temporaryManifest, { force: true });
     rmSync(databasePath(root), { force: true });
     throw error;
   } finally {
-    if (database.open) database.close();
+    if (databaseOpen) database.close();
   }
 }

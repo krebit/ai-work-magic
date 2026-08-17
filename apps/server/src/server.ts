@@ -91,6 +91,7 @@ import { addRoute, matchRoute, type AuthMode, type RequestContext, type Route } 
 import { registerSessionRoutes } from "./routes/sessions.js";
 import { registerWorkspaceRoutes } from "./routes/workspaces.js";
 import { registerCloudMcpRoutes } from "./routes/cloud-mcp.js";
+import { registerPortfolioRoutes } from "./routes/portfolio.js";
 import { captureServerException } from "./telemetry.js";
 import {
   completeLocalManagedMcpAuthorization,
@@ -2054,6 +2055,17 @@ function createRoutes(
     resolveWorkspaceWithoutBootstrap,
     createWorkspaceOpencodeClient,
     unwrapOpencodeResult,
+  });
+
+  registerPortfolioRoutes({
+    routes,
+    config,
+    jsonResponse,
+    readJsonBody,
+    ensureWritable,
+    requireClientScope,
+    resolveWorkspace,
+    resolveWorkspaceWithoutBootstrap,
   });
 
   registerCloudMcpRoutes({

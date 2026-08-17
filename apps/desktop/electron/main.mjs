@@ -987,6 +987,7 @@ if (extraLaunchArgs) {
 }
 configureFakeMediaForTests(app, envFlagEnabled("OPENWORK_ELECTRON_FAKE_MEDIA"));
 const DEFAULT_DEN_BASE_URL = "https://app.openworklabs.com";
+const DEV_DEN_BASE_URL = process.env.VITE_DEN_BASE_URL?.trim() || "";
 const DEFAULT_LOCAL_BASE_URL = "http://127.0.0.1:4096";
 const FORCE_DESKTOP_REQUIRE_SIGNIN =
   DESKTOP_DISTRIBUTION.requireSignin || envFlagEnabled("OPENWORK_FORCE_SIGNIN");
@@ -2671,6 +2672,14 @@ or use: pnpm dev:worktree`);
     }).catch((error) => {
       console.warn("[nuke] pending cleanup failed", error);
     });
+    if (isDevMode && DEV_DEN_BASE_URL) {
+      const currentBootstrap = workspaceStore.readDesktopBootstrapConfigSync();
+      await workspaceStore.setDesktopBootstrapConfig({
+        ...currentBootstrap,
+        baseUrl: DEV_DEN_BASE_URL,
+      });
+      console.info("[openwork] dev Den base URL overridden", { baseUrl: DEV_DEN_BASE_URL });
+    }
     const bootstrapConfig = await workspaceStore.getDesktopBootstrapConfig();
     currentDisplayAppName = applyBrandAppName(
       BLANK_SLATE_LAUNCH.enabled || DESKTOP_DISTRIBUTION.flavor === "enterprise"

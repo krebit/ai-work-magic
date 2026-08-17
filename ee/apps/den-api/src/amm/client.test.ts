@@ -280,6 +280,40 @@ describe("AmmResearchClient", () => {
     )
   })
 
+  it.each(["queued", "running"] as const)("rejects a nonterminal KDP %s response with a non-null result", async (state) => {
+    const client = new AmmResearchClient({
+      config,
+      fetchImpl: () => Promise.resolve(Response.json({
+        ...runResponse,
+        state,
+        result: terminalRunResponse.result,
+      })),
+    })
+
+    await expectAmmRejection(
+      client.getRun("run_test", { requestId: "req_test" }),
+      "amm_invalid_response",
+    )
+  })
+
+  it("rejects a terminal KDP run whose embedded result runId mismatches the envelope runId", async () => {
+    const client = new AmmResearchClient({
+      config,
+      fetchImpl: () => Promise.resolve(Response.json({
+        ...terminalRunResponse,
+        result: {
+          ...terminalRunResponse.result,
+          runId: "run_other",
+        },
+      })),
+    })
+
+    await expectAmmRejection(
+      client.getRun("run_test", { requestId: "req_test" }),
+      "amm_invalid_response",
+    )
+  })
+
   it("maps remote failures to stable errors without exposing the service key", async () => {
     for (const [status, code] of [
       [401, "amm_unauthorized"],

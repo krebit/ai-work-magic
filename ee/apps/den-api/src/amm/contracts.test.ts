@@ -4,6 +4,7 @@ import {
   ammProviderUsageSchema,
   ammRunCancellationAcknowledgementSchema,
   ammRunAcknowledgementSchema,
+  parseAmmRunResponse,
   scoreAmmKdpKeywordsSchema,
   startAmmKdpKeywordCollectionSchema,
   toAmmCollectionBody,
@@ -188,6 +189,35 @@ describe("AMM Den contracts", () => {
 
   it("accepts the strict managed KDP collection result returned to Den", () => {
     expect(ammKdpKeywordCollectionResultSchema.parse(validCollectionResult)).toEqual(validCollectionResult)
+  })
+
+  it.each(["queued", "running"] as const)("rejects a nonterminal KDP %s response with a non-null result", (state) => {
+    const parsed = parseAmmRunResponse({
+      runId: "run_test",
+      operation: "kdp.keyword-collection",
+      state,
+      result: validCollectionResult,
+      requestId: "req_contract_test",
+    })
+
+    expect(parsed.success).toBe(false)
+  })
+
+  it("rejects a terminal KDP response whose embedded result runId mismatches the envelope runId", () => {
+    const parsed = parseAmmRunResponse({
+      runId: "run_test",
+      operation: "kdp.keyword-collection",
+      state: "succeeded",
+      result: {
+        ...validCollectionResult,
+        runId: "run_other",
+        completeness: "complete",
+      },
+      usage: { capabilityUnits: 7, providerCalls: 3, upstreamCostUsd: "1.25" },
+      requestId: "req_contract_test",
+    })
+
+    expect(parsed.success).toBe(false)
   })
 
   it("rejects KDP collection results that expose signed or identity-bearing URL fields", () => {

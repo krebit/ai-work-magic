@@ -1029,6 +1029,62 @@ describe("AMM native routes", () => {
     expect([...store.buckets.values()][0]?.reservedUnits).toBe(20)
   })
 
+  it.each(["queued", "running"] as const)("rejects a nonterminal KDP %s result on the public operation route", async (state) => {
+    const { service, store } = serviceWithBucket()
+    const witness = new AmmWitness()
+    const app = routeApp({ client: witness, context: organizationContext(), service })
+    const startedResponse = await postJson(app, "/v1/amm/kdp/keyword-collections", startBody())
+    const started: unknown = await startedResponse.json()
+    if (!isRecord(started) || typeof started.operationId !== "string") throw new Error("missing Den operation ID")
+    const idempotencyKey = witness.startCalls[0]?.idempotencyKey
+    if (!idempotencyKey) throw new Error("missing downstream idempotency key")
+    const run = witness.runs.get(idempotencyKey)
+    if (!run) throw new Error("missing witness run")
+    witness.runs.set(idempotencyKey, {
+      ...run,
+      state,
+      result: { ...terminalCollectionResult, runId: run.runId },
+    })
+
+    const response = await app.request(`http://den-api.local/v1/amm/operations/${started.operationId}`)
+
+    expect(response.status).toBe(502)
+    expect(await response.json()).toEqual({ error: "amm_invalid_response" })
+    expect(store.ledgerEntries.size).toBe(0)
+    expect([...store.operations.values()][0]?.state).toBe("running")
+    expect([...store.buckets.values()][0]?.reservedUnits).toBe(20)
+  })
+
+  it("rejects a terminal KDP result whose embedded runId mismatches the run envelope", async () => {
+    const { service, store } = serviceWithBucket()
+    const witness = new AmmWitness()
+    const app = routeApp({ client: witness, context: organizationContext(), service })
+    const startedResponse = await postJson(app, "/v1/amm/kdp/keyword-collections", startBody())
+    const started: unknown = await startedResponse.json()
+    if (!isRecord(started) || typeof started.operationId !== "string") throw new Error("missing Den operation ID")
+    const idempotencyKey = witness.startCalls[0]?.idempotencyKey
+    if (!idempotencyKey) throw new Error("missing downstream idempotency key")
+    const run = witness.runs.get(idempotencyKey)
+    if (!run) throw new Error("missing witness run")
+    witness.runs.set(idempotencyKey, {
+      ...run,
+      state: "succeeded",
+      result: {
+        ...terminalCollectionResult,
+        runId: "run_other",
+      },
+      usage: { capabilityUnits: 7, providerCalls: 3, upstreamCostUsd: "1.25" },
+    })
+
+    const response = await app.request(`http://den-api.local/v1/amm/operations/${started.operationId}`)
+
+    expect(response.status).toBe(502)
+    expect(await response.json()).toEqual({ error: "amm_invalid_response" })
+    expect(store.ledgerEntries.size).toBe(0)
+    expect([...store.operations.values()][0]?.state).toBe("running")
+    expect([...store.buckets.values()][0]?.reservedUnits).toBe(20)
+  })
+
   it("returns observations without customer or downstream run linkage", async () => {
     const { service } = serviceWithBucket()
     const witness = new AmmWitness()

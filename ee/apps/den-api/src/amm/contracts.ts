@@ -169,37 +169,55 @@ export const ammKdpKeywordCollectionResultSchema = z.object({
   freshnessAsOf: timestampSchema.optional(),
 }).strict()
 
+function invalidAmmRunResponseIssue(path: Array<string | number>, message: string, input: unknown) {
+  return {
+    success: false as const,
+    error: new z.ZodError([{
+      code: "custom",
+      path,
+      message,
+      input,
+    }]),
+  }
+}
+
 export function parseAmmRunResponse(response: unknown) {
   const parsed = ammRunResponseSchema.safeParse(response)
   if (!parsed.success) return parsed
 
-  if (
-    parsed.data.operation === "kdp.keyword-collection"
-    && (parsed.data.state === "succeeded" || parsed.data.state === "partially_succeeded")
-  ) {
+  if (parsed.data.operation === "kdp.keyword-collection") {
+    if ((parsed.data.state === "queued" || parsed.data.state === "running") && parsed.data.result !== null) {
+      return invalidAmmRunResponseIssue(
+        ["result"],
+        "nonterminal KDP collection runs must not include a result",
+        parsed.data.result,
+      )
+    }
+
+    if (parsed.data.state !== "succeeded" && parsed.data.state !== "partially_succeeded") return parsed
+
     const result = ammKdpKeywordCollectionResultSchema.safeParse(parsed.data.result)
     if (!result.success) return result
     if (parsed.data.state === "succeeded" && result.data.completeness !== "complete") {
-      return {
-        success: false as const,
-        error: new z.ZodError([{
-          code: "custom",
-          path: ["result", "completeness"],
-          message: "succeeded KDP collection runs must report complete completeness",
-          input: result.data.completeness,
-        }]),
-      }
+      return invalidAmmRunResponseIssue(
+        ["result", "completeness"],
+        "succeeded KDP collection runs must report complete completeness",
+        result.data.completeness,
+      )
     }
     if (parsed.data.state === "partially_succeeded" && result.data.completeness !== "partial") {
-      return {
-        success: false as const,
-        error: new z.ZodError([{
-          code: "custom",
-          path: ["result", "completeness"],
-          message: "partially_succeeded KDP collection runs must report partial completeness",
-          input: result.data.completeness,
-        }]),
-      }
+      return invalidAmmRunResponseIssue(
+        ["result", "completeness"],
+        "partially_succeeded KDP collection runs must report partial completeness",
+        result.data.completeness,
+      )
+    }
+    if (result.data.runId !== parsed.data.runId) {
+      return invalidAmmRunResponseIssue(
+        ["result", "runId"],
+        "terminal KDP collection result runId must match the enclosing runId",
+        result.data.runId,
+      )
     }
     return {
       success: true as const,

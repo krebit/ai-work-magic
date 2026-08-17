@@ -32,7 +32,15 @@ test.skipIf(!enabled)(title, async ({ evidence }) => {
   needs({ optIn: ["OPENWORK_EVAL_APP_SPECS"] });
   await using app = await desktop({ name: "local-portfolio-workspace" });
   const workspace = await createAndSelectWorkspace(app, { path: `/tmp/openwork-local-portfolio-${Date.now()}` });
+  const alternateWorkspace = await createAndSelectWorkspace(app, { path: `/tmp/openwork-local-portfolio-alternate-${Date.now()}` });
   await go(app, `/workspace/${workspace.workspaceId}/portfolio`);
+  await waitFor(app, `(() => {
+    const select = document.querySelector('select[aria-label="Portfolio workspace"]');
+    return select instanceof HTMLSelectElement
+      && select.value === ${JSON.stringify(workspace.workspaceId)}
+      && [...select.options].some((option) => option.value === ${JSON.stringify(alternateWorkspace.workspaceId)});
+  })()`, { timeoutMs: 60_000, label: "workspace-scoped portfolio picker" });
+  evidence.fact("Portfolio exposes its workspace scope", "The active workspace is selected and the alternate workspace is available in the Portfolio picker.", true);
   await waitFor(app, `document.body.innerText.includes("Create this workspace’s portfolio")`, { timeoutMs: 60_000, label: "portfolio initialization UI" });
 
   expect(await setInput(app, "Portfolio name", "Creator Studio")).toBe(true);

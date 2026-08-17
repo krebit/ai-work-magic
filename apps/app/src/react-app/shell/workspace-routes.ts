@@ -12,6 +12,10 @@ export function workspacePortfolioRoute(workspaceId: string) {
   return `/workspace/${encodeURIComponent(workspaceId.trim())}/portfolio`;
 }
 
+export function workspaceSelectionRoute(workspaceId: string, portfolioActive: boolean) {
+  return portfolioActive ? workspacePortfolioRoute(workspaceId) : workspaceSessionRoute(workspaceId);
+}
+
 export function portfolioNavigationWorkspaceId(
   routeWorkspaceId?: string | null,
   sidebarWorkspaceId?: string | null,

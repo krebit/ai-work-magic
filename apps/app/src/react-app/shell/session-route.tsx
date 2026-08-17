@@ -215,6 +215,7 @@ import {
   portfolioNavigationWorkspaceId,
   workspaceExtensionsRoute,
   workspacePortfolioRoute,
+  workspaceSelectionRoute,
   workspaceSessionRoute,
   workspaceSettingsRoute,
 } from "./workspace-routes";
@@ -2656,7 +2657,17 @@ export function SessionRoute() {
       }
       primaryTitle={portfolioRouteActive ? "Portfolio" : automationsRouteActive ? "Automations" : undefined}
       primarySlot={portfolioRouteActive && selectedWorkspaceEndpoint ? (
-        <PortfolioPage client={selectedWorkspaceEndpoint.client} workspaceId={selectedWorkspaceEndpoint.workspaceId} />
+        <PortfolioPage
+          client={selectedWorkspaceEndpoint.client}
+          workspaceId={selectedWorkspaceEndpoint.workspaceId}
+          selectedWorkspaceId={selectedWorkspaceId}
+          workspaces={workspaces.map((workspace) => ({ id: workspace.id, name: workspace.displayNameResolved }))}
+          onSelectWorkspace={(workspaceId) => {
+            setLegacySelectedWorkspaceId(workspaceId);
+            writeActiveWorkspaceId(workspaceId);
+            navigate(workspacePortfolioRoute(workspaceId));
+          }}
+        />
       ) : automationsRouteActive ? <AutomationsPage providerCatalog={providerCatalog} /> : undefined}
       terminalOpen={terminalOpen}
       onTerminalOpenChange={setTerminalOpen}
@@ -2710,6 +2721,10 @@ export function SessionRoute() {
             if (endpoint) {
               void endpoint.client.activateWorkspace(endpoint.workspaceId, { persist: true }).catch(() => undefined);
             }
+          }
+          if (portfolioRouteActive) {
+            navigate(workspaceSelectionRoute(workspaceId, true));
+            return true;
           }
           // If we remember what the user last opened here and that session
           // still exists in our local list, navigate. Otherwise stay put.

@@ -96,6 +96,10 @@ const portfolioSessionArgsSchema = portfolioWorkspaceArgsSchema.extend({ session
 const portfolioSessionSetArgsSchema = portfolioSessionArgsSchema.extend({ projectId: z.string().trim().min(1).optional() });
 const portfolioArtifactsListArgsSchema = portfolioWorkspaceArgsSchema.extend({ projectId: z.string().trim().min(1).optional(), sessionId: z.string().trim().min(1).optional() });
 const portfolioArtifactRegisterArgsSchema = portfolioArtifactsListArgsSchema.extend({ path: z.string().trim().min(1), role: z.string().trim().min(1) });
+const portfolioResearchBaseSchema = portfolioWorkspaceArgsSchema.extend({ projectId: z.string().trim().min(1) });
+const portfolioResearchRunCreateSchema = portfolioResearchBaseSchema.extend({ idempotencyKey: z.string().trim().min(1), researchType: z.string().trim().min(1), trigger: z.string().trim().min(1), requestPayload: z.record(z.string(), z.unknown()), startedAt: z.string().datetime() });
+const portfolioResearchRunCompleteSchema = portfolioResearchBaseSchema.extend({ runId: z.string().trim().min(1), idempotencyKey: z.string().trim().min(1), status: z.enum(["completed", "partial", "failed", "cancelled"]), completedAt: z.string().datetime() });
+const portfolioResearchEnvelopeSchema = portfolioResearchBaseSchema.extend({ snapshot: z.record(z.string(), z.unknown()).optional(), evaluation: z.record(z.string(), z.unknown()).optional(), decision: z.record(z.string(), z.unknown()).optional() });
 
 const workspaceSchema = z.object({
   id: z.string(),
@@ -466,6 +470,9 @@ async function queryOpenworkAffordance(rawArgs: unknown, context: OpenCodeContex
   }
   if (request.id === "portfolio.inspect" || request.id === "portfolio.session.get" || request.id === "portfolio.artifacts.list") {
     return affordanceResult(request.id, await queryPortfolio(request.id, request.args ?? {}, context), affordanceReadEffects);
+  }
+  if (request.id === "portfolio.research.inspect" || request.id === "portfolio.research.observations.list") {
+    const args = portfolioResearchBaseSchema.parse(request.args ?? {}); const workspace = await portfolioWorkspace(args.workspaceId, context); const base = portfolioPath(workspace.id, `/projects/${encodeURIComponent(args.projectId)}/research`); const result = await serverGet(request.id.endsWith("observations.list") ? `${base}/observations` : base); return affordanceResult(request.id, { workspaceId: workspace.id, workspace: workspaceLabel(workspace), ...isRecord(result) ? result : { result } }, affordanceReadEffects);
   }
   if (request.id === "extension.actions") {
     const args = listActionsArgsSchema.parse(request.args ?? {});
@@ -924,6 +931,9 @@ async function queryPortfolio(id: string, rawArgs: unknown, context: OpenCodeCon
 }
 
 async function executePortfolio(id: string, rawArgs: unknown, context: OpenCodeContext): Promise<object> {
+  if (id === "portfolio.research.run.create") { const { workspaceId, projectId, ...body } = portfolioResearchRunCreateSchema.parse(rawArgs); const workspace = await portfolioWorkspace(workspaceId, context); return { workspaceId: workspace.id, workspace: workspaceLabel(workspace), run: await serverJson("POST", portfolioPath(workspace.id, `/projects/${encodeURIComponent(projectId)}/research/runs`), body) }; }
+  if (id === "portfolio.research.run.complete") { const { workspaceId, projectId, runId, ...body } = portfolioResearchRunCompleteSchema.parse(rawArgs); const workspace = await portfolioWorkspace(workspaceId, context); return { workspaceId: workspace.id, workspace: workspaceLabel(workspace), run: await serverJson("PATCH", portfolioPath(workspace.id, `/projects/${encodeURIComponent(projectId)}/research/runs/${encodeURIComponent(runId)}`), body) }; }
+  if (id === "portfolio.research.snapshot.seal" || id === "portfolio.research.evaluation.record" || id === "portfolio.research.decision.record") { const args = portfolioResearchEnvelopeSchema.parse(rawArgs); const workspace = await portfolioWorkspace(args.workspaceId, context); const key = id.endsWith("snapshot.seal") ? "snapshot" : id.endsWith("evaluation.record") ? "evaluation" : "decision"; const body = args[key]; if (!body) throw new Error(`${key} is required`); const segment = key === "snapshot" ? "snapshots" : key === "evaluation" ? "evaluations" : "decisions"; return { workspaceId: workspace.id, workspace: workspaceLabel(workspace), [key]: await serverJson("POST", portfolioPath(workspace.id, `/projects/${encodeURIComponent(args.projectId)}/research/${segment}`), body) }; }
   if (id === "portfolio.initialize") {
     const { workspaceId, ...body } = portfolioInitializeArgsSchema.parse(rawArgs);
     const workspace = await portfolioWorkspace(workspaceId, context);

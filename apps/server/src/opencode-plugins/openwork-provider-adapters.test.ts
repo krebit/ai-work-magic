@@ -23,6 +23,13 @@ describe("OpenWork provider adapters", () => {
       "portfolio.session.set",
       "portfolio.artifacts.list",
       "portfolio.artifact.register",
+      "portfolio.research.inspect",
+      "portfolio.research.run.create",
+      "portfolio.research.run.complete",
+      "portfolio.research.snapshot.seal",
+      "portfolio.research.observations.list",
+      "portfolio.research.evaluation.record",
+      "portfolio.research.decision.record",
     ]);
     expect(
       contributions.flatMap((contribution) => contribution.affordances)

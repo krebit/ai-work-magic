@@ -161,6 +161,12 @@ function startFakeOpenWorkServer() {
       if (url.pathname === "/workspace/ws_2/portfolio/projects" && request.method === "POST") {
         return Response.json({ id: "prj_1", revision: 1, ...z.record(z.string(), z.unknown()).parse(record.body) }, { status: 201 });
       }
+      if (url.pathname === "/workspace/ws_2/portfolio/projects/prj_research/research") {
+        return Response.json({ runs: [], snapshots: [], observations: [{ metric: "trend", canonicalValue: 42 }], evaluations: [], decisions: [] });
+      }
+      if (url.pathname === "/workspace/ws_2/portfolio/projects/prj_research/research/runs" && request.method === "POST") {
+        return Response.json({ id: "rrn_1", projectId: "prj_research", ...z.record(z.string(), z.unknown()).parse(record.body) }, { status: 201 });
+      }
 
       if (url.pathname === "/workspace/ws_1/sessions") {
         return Response.json({ items: [sessionAlpha, sessionBeta] });
@@ -376,6 +382,16 @@ describe("OpenWorkExtensionsPreview session tools", () => {
       authorization: "Bearer test-token",
       body: { title: "Moon Harbor", kind: "series", vertical: "short-drama", lifecycleStage: "research" },
     });
+  });
+
+  test("reads and starts project research through the authenticated current workspace", async () => {
+    const fake = startFakeOpenWorkServer();
+    const plugin = await OpenWorkExtensionsPreview({ directory: "/tmp/archive" });
+    const inspected = JSON.parse(await plugin.tool.openwork_query.execute({ id: "portfolio.research.inspect", args: { projectId: "prj_research" } }));
+    expect(inspected).toMatchObject({ ok: true, result: { workspaceId: "ws_2", observations: [{ metric: "trend", canonicalValue: 42 }] } });
+    const created = JSON.parse(await plugin.tool.openwork_execute.execute({ id: "portfolio.research.run.create", args: { projectId: "prj_research", idempotencyKey: "run", researchType: "video.topic-trends", trigger: "manual", requestPayload: {}, startedAt: "2026-08-17T00:00:00.000Z" } }, { sessionID: "ses_origin" }));
+    expect(created).toMatchObject({ ok: true, result: { workspaceId: "ws_2", run: { id: "rrn_1" } } });
+    expect(fake.requests.find((request) => request.pathname.endsWith("/research/runs") && request.method === "POST")?.authorization).toBe("Bearer test-token");
   });
 
   test("routes semantic session queries without navigating the UI", async () => {

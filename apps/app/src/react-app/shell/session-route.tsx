@@ -212,6 +212,7 @@ import {
   globalExtensionsRoute,
   legacySessionRoute,
   automationsRoute,
+  portfolioNavigationWorkspaceId,
   workspaceExtensionsRoute,
   workspacePortfolioRoute,
   workspaceSessionRoute,
@@ -1234,6 +1235,7 @@ export function SessionRoute() {
   }, [navigate, selectedSessionId, sidebarActiveWorkspaceId]);
 
   const extensionsMainOpen = /^\/(?:workspace\/[^/]+\/)?extensions(?:\/|$)/.test(location.pathname);
+  const portfolioWorkspaceId = portfolioNavigationWorkspaceId(selectedWorkspaceId, sidebarActiveWorkspaceId);
 
   const surfaceProps = useMemo(() => {
     if (!client || !selectedWorkspaceId || !selectedSessionId || !opencodeBaseUrl || !token || !opencodeClient) {
@@ -2670,7 +2672,7 @@ export function SessionRoute() {
         startupPhase: effectiveLoading ? "nativeInit" : "ready",
         automationsActive: automationsRouteActive,
         portfolioActive: portfolioRouteActive,
-        onOpenPortfolio: selectedWorkspaceId ? () => navigate(workspacePortfolioRoute(selectedWorkspaceId)) : undefined,
+        onOpenPortfolio: portfolioWorkspaceId ? () => navigate(workspacePortfolioRoute(portfolioWorkspaceId)) : undefined,
         automationsNeedAttention,
         onOpenAutomations: automationsNavigationAvailable
           ? () => {

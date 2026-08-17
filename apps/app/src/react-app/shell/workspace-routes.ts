@@ -12,6 +12,13 @@ export function workspacePortfolioRoute(workspaceId: string) {
   return `/workspace/${encodeURIComponent(workspaceId.trim())}/portfolio`;
 }
 
+export function portfolioNavigationWorkspaceId(
+  routeWorkspaceId?: string | null,
+  sidebarWorkspaceId?: string | null,
+) {
+  return routeWorkspaceId?.trim() || sidebarWorkspaceId?.trim() || null;
+}
+
 export function workspaceSettingsRoute(
   workspaceId: string,
   tab: SettingsTab | "extensions/mcp" | "extensions/plugins" | string = "general",

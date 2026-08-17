@@ -4,7 +4,7 @@
 
 **Goal:** Connect AI Work Magic, its local KDP research skill and Portfolio, Den's public MCP gateway, and the existing `ai-api-magic` research service, then prove the complete feature with hard-capped real provider calls from the browser experience.
 
-**Architecture:** AI Work Magic remains the customer UI and local project system. Den authenticates the user and organization, checks an AMM entitlement, reserves capability quota, exposes thin KDP operations through `/mcp/agent`, and invokes private `ai-api-magic` with one service bearer credential and no customer identifiers. `ai-api-magic` owns asynchronous provider execution, operational provider usage/cost, evidence, and the global corpus; Den owns customer-to-operation mappings and commercial reconciliation. The installed KDP skill orchestrates Den capabilities and writes the reviewed niche brief and evidence artifact into the workspace-local Portfolio.
+**Architecture:** AI Work Magic remains the customer UI and local project system. Den authenticates the user and organization, checks an AMM entitlement, reserves capability quota, exposes thin KDP operations through `/mcp/agent`, and invokes private `ai-api-magic` with one service bearer credential and no customer identifiers. `ai-api-magic` owns asynchronous provider execution, operational provider usage/cost, evidence, and the global corpus; Den owns customer-to-operation mappings and commercial reconciliation. The already-implemented generic Portfolio research-history feature owns local canonical history. The installed KDP skill validates and translates Den results into a Portfolio research project, run, immutable snapshot and observations, evidence link, and evaluation; the Markdown niche brief is a derived human-readable artifact rather than the canonical record.
 
 **Tech Stack:** TypeScript, Hono, Zod, Drizzle/MySQL (Den), Next.js route handlers, PostgreSQL, pg-boss (`ai-api-magic`), OpenCode/OpenWork skills, local Portfolio SQLite, `@openwork/testkit`, CDP/Playwright MCP, Vitest, pnpm.
 
@@ -17,7 +17,11 @@
 - Den authenticates to `ai-api-magic` with `Authorization: Bearer <DEN_TO_AMM_SERVICE_KEY>`; the key must never enter Vite variables, browser storage, chat messages, screenshots, test tapes, or Portfolio artifacts.
 - Den sends a globally unique AMM idempotency key and `X-Request-Id`; no identity headers are permitted on the Den-to-AMM request.
 - The market corpus is global and reusable. Only rights-approved generic observations may enter it; workspace/project/customer identifiers and private decisions may not.
-- Customer projects, briefs, decisions, and artifact files remain in the selected AI Work Magic workspace and `.amm/portfolio.sqlite`.
+- Assume `docs/superpowers/specs/2026-08-17-generic-portfolio-research-history-design.md` is fully implemented and verified before starting this plan. Do not reimplement its schema, repository, local API, OpenCode affordances, migration, or Research history UI here.
+- Local research projects, runs, snapshots, observations, evaluations, decisions, evidence links, and artifact files remain in the selected AI Work Magic workspace and `.amm/portfolio.sqlite`.
+- The existing Portfolio `Project` with normalized `kind: "research"` is the only local research identity. Do not create a separate `ResearchProject` or model research as a `book` project in a `research` lifecycle.
+- Persist each returned canonical collection as an immutable Portfolio research snapshot with typed observations. A Markdown niche brief may be registered and pinned as evidence, but must not be the sole or canonical persistence mechanism.
+- Record a Portfolio research decision only when the user explicitly supplies or confirms `accept`, `reject`, or `more-research`; a successful collection or score must not imply a decision.
 - Real provider tests must use one keyword, `search.depth: 3`, `maxProducts: 3`, `maxPages: 1`, and `maxUnits: 20`. Do not broaden those limits while diagnosing a failure.
 - The live lane requires real DataForSEO and SerpApi calls. MerchantWords may participate in the expansion smoke only after the collection proof passes. Never print environment values.
 - The authoritative pass/fail artifact is an `evals/specs/**/*.slow.test.ts` `@openwork/testkit` tape. Playwright MCP is the interactive browser driver and diagnostic witness, not the sole assertion mechanism.
@@ -45,9 +49,30 @@ Playwright MCP / @openwork/testkit
        queue and execute managed run
        report evidence + actual provider usage/cost
   -> Den reconciles reservation and authorizes result read
-  -> agent produces evidence-backed niche brief
-  -> local Portfolio project + workspace artifact registration
+  -> KDP skill validates and canonicalizes the returned vertical payload
+  -> local Portfolio Project(kind="research", vertical="amazon-kdp")
+       -> ResearchRun
+       -> immutable ResearchSnapshot + typed ResearchObservation[]
+       -> registered brief/evidence ArtifactVersion + ResearchEvidenceLink
+       -> immutable ResearchEvaluation
+       -> ResearchDecision only after explicit user choice
+  -> Portfolio Research history UI renders the canonical record
 ```
+
+The generic Portfolio research-history implementation is a prerequisite, not a task in this plan. Its canonical interfaces are:
+
+```text
+portfolio.research.inspect
+portfolio.research.run.create
+portfolio.research.run.complete
+portfolio.research.snapshot.seal
+portfolio.research.observations.list
+portfolio.research.evidence.link
+portfolio.research.evaluation.record
+portfolio.research.decision.record
+```
+
+The KDP integration must use these semantic affordances through `openwork_query` and `openwork_execute`; it must not write `.amm/portfolio.sqlite` directly.
 
 The first callable Den operations are deliberately small:
 
@@ -545,7 +570,7 @@ git commit -m "feat: report managed research usage"
 
 ---
 
-### Task 7: Make the Canonical KDP Skill Invoke Den and Persist Local Outcomes
+### Task 7: Make the Canonical KDP Skill Invoke Den and Record Canonical Research History
 
 **Repository:** `/home/alerios/Tech/ai-agents/ai-money-magic`
 
@@ -559,8 +584,8 @@ git commit -m "feat: report managed research usage"
 - Create: `/home/alerios/Tech/ai-agents/ai-work-magic/.opencode/skills/kdp-niche-research/SKILL.md`
 
 **Interfaces:**
-- Consumes: exact Den operations from Task 5 and local Portfolio affordances from `amm-docs/PORTFOLIO.md`.
-- Produces: a deterministic agent workflow ending in a local research project and registered Markdown brief.
+- Consumes: exact Den operations from Task 5 and the already-implemented generic research-history affordances specified in `docs/superpowers/specs/2026-08-17-generic-portfolio-research-history-design.md`.
+- Produces: a deterministic agent workflow ending in a canonical local research run, snapshot, observations, evidence link, and evaluation, plus a derived Markdown brief.
 
 - [ ] **Step 1: Add a distribution assertion before changing the skill**
 
@@ -574,6 +599,13 @@ scoreAmmKdpKeywords
 portfolio.inspect
 portfolio.project.create
 portfolio.artifact.register
+portfolio.research.inspect
+portfolio.research.run.create
+portfolio.research.run.complete
+portfolio.research.snapshot.seal
+portfolio.research.observations.list
+portfolio.research.evidence.link
+portfolio.research.evaluation.record
 ```
 
 - [ ] **Step 2: Run the distribution check and verify failure**
@@ -587,15 +619,18 @@ Expected: FAIL after adding the assertion because `skillMarkdown()` currently em
 Update the KDP-only branch inside `skillMarkdown()` so the generated canonical workflow requires the agent to:
 
 1. inspect the active local Portfolio;
-2. initialize it only after the user's request implies durable KDP project work;
+2. initialize it only after the user's request implies durable KDP research work, then find or create exactly one Portfolio project with `kind: "research"`, `vertical: "amazon-kdp"`, and a stable title derived from the niche; do not create a `book` project;
 3. search Den for `kdp keyword research observations` and use only exact returned capability names;
-4. generate one stable `operationKey` and reuse it for retries;
-5. start one hard-capped collection and poll the Den operation, never an AMM run ID;
-6. state partial/provider-degraded results honestly;
-7. derive the documented 0–100 demand and competition inputs only from returned observations, invoke `scoreAmmKdpKeywords`, and preserve both inputs beside the returned `demand - competition` score; never invent missing metrics;
-8. write `research/kdp/<slug>-niche-brief.md` containing keyword, evaluation time, metrics, products, evidence sources, diagnostics, score inputs/calculation, and next approval;
-9. create/update a local `book` project in lifecycle `research` and register the brief artifact;
-10. stop before book selection, manuscript creation, publication, or spend.
+4. call `portfolio.research.run.create` before paid execution with `researchType: "amazon-kdp.keyword-opportunity"`, an immutable canonical request payload, and a stable local idempotency key; retain the returned Portfolio run ID separately from Den's operation ID;
+5. generate one stable Den `operationKey` and reuse it for retries;
+6. start one hard-capped collection and poll the Den operation, never an AMM run ID;
+7. validate the returned KDP payload against the versioned vertical contract before local persistence; reject secret-bearing URLs and never persist an unvalidated provider response as a trusted observation;
+8. state partial/provider-degraded results honestly and complete the Portfolio run with the matching terminal status (`completed`, `partial`, `failed`, or `cancelled`);
+9. seal one immutable snapshot with `state: "complete"` or `"partial"`, the validated canonical KDP payload and digest, diagnostics, and typed observations carrying subject, metric, canonical value, unit, provider/version, observed time, evidence references, and observation digest;
+10. derive the documented 0–100 demand and competition inputs only from returned observations, invoke `scoreAmmKdpKeywords`, never invent missing metrics, and record the result through `portfolio.research.evaluation.record` with its policy/engine identity, request/result payloads, digests, and `evaluationAsOf`;
+11. write `research/kdp/<slug>-niche-brief.md` containing keyword, evaluation time, metrics, products, evidence sources, diagnostics, score inputs/calculation, and next approval; register its workspace-relative artifact version and pin that exact version through `portfolio.research.evidence.link`;
+12. query `portfolio.research.inspect` and `portfolio.research.observations.list` to verify the saved history is readable; do not call `portfolio.research.decision.record` unless the user explicitly chooses `accept`, `reject`, or `more-research`;
+13. stop before resulting book-project creation, manuscript creation, publication, or further spend.
 
 - [ ] **Step 4: Regenerate distributions and install the generated skill**
 
@@ -746,9 +781,10 @@ test("KDP research flows through Den and real AMM providers into the local Portf
       "SERPAPI_API_KEY",
     ],
   })
-  // Test body follows.
 })
 ```
+
+The remaining steps define every browser action and assertion that belongs inside this test.
 
 - [ ] **Step 2: Build the browser journey**
 
@@ -762,7 +798,7 @@ Use a unique workspace and keyword marker. In the UI:
 6. send exactly:
 
 ```text
-Research the Amazon.com paperback niche "fantasy romance" using the managed KDP capability and real provider evidence. Use at most 20 capability units, 3 search results, 3 enriched products, and 1 page. Create a local research-stage book project and register the final Markdown niche brief in this workspace. Do not create a manuscript, publish, or spend beyond this research request.
+Research the Amazon.com paperback niche "fantasy romance" using the managed KDP capability and real provider evidence. Use at most 20 capability units, 3 search results, 3 enriched products, and 1 page. Record the validated result in one local Portfolio research project using the canonical research history, and register the final Markdown niche brief as linked evidence. Do not record a decision, create a book project or manuscript, publish, or spend beyond this research request.
 ```
 
 7. wait up to 180 seconds for the Den/AMM operation to reach a terminal state;
@@ -781,9 +817,15 @@ at least one real provider usage event exists for DataForSEO or SerpApi
 provider_calls >= 1 and upstream_cost_usd >= 0
 one Den completion ledger event reconciled the reservation
 the chat displays demand/competition evidence and source timestamps
-the Portfolio contains one research-stage book project
+the Portfolio contains one project with kind research and vertical amazon-kdp
+one amazon-kdp.keyword-opportunity ResearchRun reached the matching terminal state
+one immutable complete or partial ResearchSnapshot contains the canonical payload digest
+typed ResearchObservation rows preserve metric values, providers, observed timestamps, and evidence references
+one immutable ResearchEvaluation preserves policy/engine identity and score inputs/result digests
 the registered artifact path is workspace-relative and exists
+one ResearchEvidenceLink pins the exact registered brief ArtifactVersion
 the brief includes the keyword, evidence, score inputs/calculation, diagnostics, and approval boundary
+the Research history UI/API renders the run, snapshot, observations, evaluation, and linked evidence
 ```
 
 - [ ] **Step 4: Add negative machine assertions**
@@ -792,12 +834,14 @@ Assert:
 
 ```text
 the browser DOM, localStorage, sessionStorage, network response bodies, chat transcript,
-Portfolio YAML/SQLite, brief, screenshots, and tape do not contain the service key
+Portfolio YAML/SQLite, research canonical payloads, observations, evaluations, brief,
+screenshots, and tape do not contain the service key
 
 the AMM captured request headers/body and corpus rows contain no Den organization,
 member, user, subscription, reservation, workspace, project, or Portfolio identifiers
 
-no manuscript, publication, campaign, or non-research Portfolio project was created
+no ResearchDecision was recorded without an explicit user choice
+no book, manuscript, publication, campaign, or non-research Portfolio project was created
 the alternate workspace remains uninitialized or unchanged
 ```
 
@@ -815,7 +859,7 @@ Use `screenshot()` for:
 cloud connection ready
 research request in chat
 terminal evidence-backed reply
-Portfolio project and registered brief
+Portfolio Research history with snapshot, evaluation, and linked brief
 ```
 
 Use `validate()` for visible claims, while tape facts and direct assertions remain authoritative.
@@ -866,7 +910,7 @@ Do not alter limits or add hidden IDs. Observe tool calls, asynchronous progress
 
 - [ ] **Step 4: Inspect the local Portfolio**
 
-Navigate to the Portfolio page, verify the research-stage project and brief artifact, open the workspace-relative Markdown file, and confirm its evidence/score/approval sections.
+Navigate to the Portfolio page and open **Research history** for the `kind: "research"`, `vertical: "amazon-kdp"` project. Verify the run terminal state, immutable snapshot state/digest, observation provider/timestamps, evaluation policy/score, and exact linked brief artifact version. Open the workspace-relative Markdown file and confirm its evidence/score/approval sections. Confirm there is no decision and no resulting book project.
 
 - [ ] **Step 5: Compare Playwright observations with the testkit tape**
 
@@ -877,7 +921,7 @@ Every claimed success must correspond to a Task 9 machine assertion. Differences
 ### Task 11: Cold-Boot Verification and Handoff
 
 **Files:**
-- Modify: `amm-docs/PORTFOLIO.md` to add the verified KDP research skill example and state that Den research results are committed locally as Portfolio artifacts.
+- Modify: `amm-docs/PORTFOLIO.md` to add the verified KDP research skill example and state that validated Den results are committed to canonical local research history, with Portfolio artifacts pinned as evidence.
 - Modify: `CHANGELOG.md` in each repository for its own implementation slice.
 
 **Interfaces:**
@@ -916,7 +960,7 @@ Stop the warm Den, AMM API/worker, and headless web processes through their docu
 
 - [ ] **Step 3: Run the authoritative live spec once on the final commits**
 
-Run the exact Task 9 command. Record command, commit IDs for all three repositories, exit code, passed/failed/skipped counts, Den operation ID, redacted AMM run reference, provider names, capability units, provider calls, upstream cost, corpus hit status, and artifact path.
+Run the exact Task 9 command. Record command, commit IDs for all three repositories, exit code, passed/failed/skipped counts, Den operation ID, redacted AMM run reference, local Portfolio project/run/snapshot/evaluation IDs, provider names, capability units, provider calls, upstream cost, corpus hit status, and linked artifact/version path.
 
 - [ ] **Step 4: Assign the verdict**
 
@@ -943,7 +987,10 @@ Never combine unrelated existing changes. Do not push or open a PR unless separa
 - [ ] AMM reports operational provider usage/cost and Den reconciles exactly once.
 - [ ] Repeating the same operation key does not create another AMM run or provider charge.
 - [ ] The result includes evidence, timestamps, diagnostics, and transparent score inputs/calculation.
-- [ ] A research-stage local Portfolio project and workspace-relative Markdown artifact exist.
+- [ ] One local Portfolio project with `kind: "research"` and `vertical: "amazon-kdp"` owns the completed/partial run, immutable snapshot, typed observations, and immutable evaluation.
+- [ ] The workspace-relative Markdown artifact exists and an evidence link pins its exact artifact version; it is not the sole canonical research record.
+- [ ] The Research history UI renders the saved run, snapshot, observations, evaluation, and linked evidence.
+- [ ] No research decision exists unless the user explicitly chose `accept`, `reject`, or `more-research`.
 - [ ] Another workspace remains unchanged.
 - [ ] No manuscript, publication, campaign, or unapproved consequential action occurs.
 - [ ] The service key and Den identifiers are absent from browser state, chat, artifacts, tape, AMM requests, and corpus records as applicable.

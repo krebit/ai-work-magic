@@ -1,0 +1,18 @@
+export type ResearchRunStatus = "planned" | "running" | "completed" | "partial" | "failed" | "cancelled";
+export type ResearchSnapshotState = "complete" | "partial" | "invalid";
+export type ResearchObservationValueType = "string" | "integer" | "decimal" | "boolean" | "json";
+export type ResearchDecisionValue = "accept" | "reject" | "more-research";
+
+export interface ResearchRun { id: string; projectId: string; researchType: string; status: ResearchRunStatus; trigger: string; requestPayload: Record<string, unknown>; requestDigest: string; startedAt: string; completedAt: string | null; createdAt: string }
+export interface ResearchSnapshot { id: string; projectId: string; runId: string; sequence: number; state: ResearchSnapshotState; capturedAt: string; sealedAt: string; supersedesSnapshotId: string | null; canonicalPayload: Record<string, unknown>; canonicalPayloadDigest: string; diagnosticSummary: Record<string, unknown> }
+export interface ResearchObservation { id: string; snapshotId: string; subjectType: string; subjectKey: string; metric: string; valueType: ResearchObservationValueType; canonicalValue: unknown; unit: string | null; provider: string | null; providerVersion: string | null; observedAt: string; evidenceRefs: string[]; observationDigest: string }
+export interface ResearchEvaluation { id: string; projectId: string; snapshotId: string; evaluationType: string; policyRef: string; engineRef: string | null; evaluationAsOf: string; requestPayload: Record<string, unknown>; requestDigest: string; resultPayload: Record<string, unknown>; resultDigest: string; createdAt: string }
+export interface ResearchDecision { id: string; projectId: string; evaluationId: string | null; decision: ResearchDecisionValue; rationale: string; selectedSubjectRefs: string[]; requestedFollowUp: string[]; actorRef: string; decidedAt: string; supersedesDecisionId: string | null }
+export interface ResearchHistory { runs: ResearchRun[]; snapshots: ResearchSnapshot[]; observations: ResearchObservation[]; evaluations: ResearchEvaluation[]; decisions: ResearchDecision[] }
+
+export interface CreateResearchRunInput { idempotencyKey: string; researchType: string; trigger: string; requestPayload: Record<string, unknown>; startedAt: string }
+export interface CompleteResearchRunInput { idempotencyKey: string; status: Exclude<ResearchRunStatus, "planned" | "running">; completedAt: string }
+export interface ResearchObservationInput { subjectType: string; subjectKey: string; metric: string; valueType: ResearchObservationValueType; canonicalValue: unknown; unit?: string; provider?: string; providerVersion?: string; observedAt: string; evidenceRefs?: string[] }
+export interface SealResearchSnapshotInput { idempotencyKey: string; runId: string; state: ResearchSnapshotState; capturedAt: string; sealedAt: string; supersedesSnapshotId?: string; canonicalPayload: Record<string, unknown>; diagnosticSummary?: Record<string, unknown>; observations: ResearchObservationInput[] }
+export interface RecordResearchEvaluationInput { idempotencyKey: string; snapshotId: string; evaluationType: string; policyRef: string; engineRef?: string; evaluationAsOf: string; requestPayload: Record<string, unknown>; resultPayload: Record<string, unknown> }
+export interface RecordResearchDecisionInput { idempotencyKey: string; evaluationId?: string; decision: ResearchDecisionValue; rationale: string; selectedSubjectRefs?: string[]; requestedFollowUp?: string[]; actorRef: string; decidedAt: string; supersedesDecisionId?: string }

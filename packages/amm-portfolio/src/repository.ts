@@ -22,6 +22,7 @@ import type {
   PortfolioSnapshot,
   UpdateProjectInput,
 } from "./types.js";
+import type { CompleteResearchRunInput, CreateResearchRunInput, RecordResearchDecisionInput, RecordResearchEvaluationInput, ResearchDecision, ResearchEvaluation, ResearchHistory, ResearchObservation, ResearchRun, ResearchSnapshot, SealResearchSnapshotInput } from "./research-types.js";
 
 const manifestName = "portfolio.yaml";
 const databasePath = (root: string) => join(root, ".amm", "portfolio.sqlite");
@@ -45,6 +46,16 @@ function rowProject(row: Record<string, string | number | null>): PortfolioProje
     updatedAt: String(row.updated_at),
   };
 }
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") return `{${Object.entries(value).sort(([left], [right]) => left.localeCompare(right)).map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`).join(",")}}`;
+  return JSON.stringify(value);
+}
+
+function digest(value: unknown): string { return createHash("sha256").update(canonicalJson(value)).digest("hex"); }
+function jsonObject(value: string): Record<string, unknown> { const parsed: unknown = JSON.parse(value); if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new PortfolioError("research_payload_invalid"); return parsed as Record<string, unknown>; }
+function jsonStrings(value: string): string[] { const parsed: unknown = JSON.parse(value); if (!Array.isArray(parsed) || parsed.some((item) => typeof item !== "string")) throw new PortfolioError("research_payload_invalid"); return parsed; }
 
 export class PortfolioRepository {
   constructor(private readonly database: SqliteDatabase, private readonly root: string) {}
@@ -97,6 +108,93 @@ export class PortfolioRepository {
     const project = this.getProject(id);
     if (!project) throw new PortfolioError("project_not_found");
     return project;
+  }
+
+  private requireResearchProject(projectId: string): PortfolioProject {
+    const project = this.getProject(projectId);
+    if (!project) throw new PortfolioError("project_not_found");
+    if (project.kind.trim().toLowerCase() !== "research") throw new PortfolioError("research_project_kind_required");
+    return project;
+  }
+
+  private idempotent(key: string, operation: string, input: unknown): string | null {
+    const requestDigest = digest(input);
+    const prior = this.database.prepare("SELECT operation, request_digest, resource_id FROM idempotency_keys WHERE key = ?").get(key) as { operation: string; request_digest: string; resource_id: string } | undefined;
+    if (!prior) return null;
+    if (prior.operation !== operation || prior.request_digest !== requestDigest) throw new PortfolioError("idempotency_conflict");
+    return prior.resource_id;
+  }
+
+  createResearchRun(projectId: string, input: CreateResearchRunInput): ResearchRun {
+    this.requireResearchProject(projectId);
+    const prior = this.idempotent(input.idempotencyKey, "create-research-run", { projectId, ...input });
+    if (prior) return this.getResearchRun(projectId, prior);
+    const id = randomUUID(); const createdAt = new Date().toISOString(); const payload = canonicalJson(input.requestPayload);
+    this.database.transaction(() => {
+      this.database.prepare("INSERT INTO research_runs VALUES (?, ?, ?, 'running', ?, ?, ?, ?, NULL, ?)").run(id, projectId, requiredText(input.researchType, "researchType", 160), requiredText(input.trigger, "trigger", 100), payload, digest(input.requestPayload), input.startedAt, createdAt);
+      this.database.prepare("INSERT INTO idempotency_keys VALUES (?, 'create-research-run', ?, ?)").run(input.idempotencyKey, digest({ projectId, ...input }), id);
+    })();
+    return this.getResearchRun(projectId, id);
+  }
+
+  getResearchRun(projectId: string, runId: string): ResearchRun {
+    this.requireResearchProject(projectId);
+    const row = this.database.prepare("SELECT * FROM research_runs WHERE id=? AND project_id=?").get(runId, projectId) as Record<string, string | null> | undefined;
+    if (!row) throw new PortfolioError("research_run_not_found");
+    return { id: String(row.id), projectId: String(row.project_id), researchType: String(row.research_type), status: String(row.status) as ResearchRun["status"], trigger: String(row.trigger), requestPayload: jsonObject(String(row.request_payload_json)), requestDigest: String(row.request_digest), startedAt: String(row.started_at), completedAt: row.completed_at, createdAt: String(row.created_at) };
+  }
+
+  completeResearchRun(projectId: string, runId: string, input: CompleteResearchRunInput): ResearchRun {
+    const run = this.getResearchRun(projectId, runId); const prior = this.idempotent(input.idempotencyKey, "complete-research-run", { projectId, runId, ...input });
+    if (prior) return this.getResearchRun(projectId, prior);
+    if (!["planned", "running"].includes(run.status)) throw new PortfolioError("research_run_terminal");
+    this.database.transaction(() => { this.database.prepare("UPDATE research_runs SET status=?, completed_at=? WHERE id=?").run(input.status, input.completedAt, runId); this.database.prepare("INSERT INTO idempotency_keys VALUES (?, 'complete-research-run', ?, ?)").run(input.idempotencyKey, digest({ projectId, runId, ...input }), runId); })();
+    return this.getResearchRun(projectId, runId);
+  }
+
+  sealResearchSnapshot(projectId: string, input: SealResearchSnapshotInput): ResearchSnapshot {
+    this.requireResearchProject(projectId); this.getResearchRun(projectId, input.runId);
+    const prior = this.idempotent(input.idempotencyKey, "seal-research-snapshot", { projectId, ...input });
+    if (prior) return this.getResearchSnapshot(projectId, prior);
+    if (input.supersedesSnapshotId) this.getResearchSnapshot(projectId, input.supersedesSnapshotId);
+    const sequenceRow = this.database.prepare("SELECT COALESCE(MAX(sequence), 0) + 1 AS sequence FROM research_snapshots WHERE project_id=?").get(projectId) as { sequence: number };
+    const id = randomUUID(); const payload = canonicalJson(input.canonicalPayload); const requestDigest = digest({ projectId, ...input });
+    this.database.transaction(() => {
+      this.database.prepare("INSERT INTO research_snapshots VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(id, projectId, input.runId, Number(sequenceRow.sequence), input.state, input.capturedAt, input.sealedAt, input.supersedesSnapshotId ?? null, payload, digest(input.canonicalPayload), canonicalJson(input.diagnosticSummary ?? {}));
+      for (const observation of input.observations) { const observationId = randomUUID(); const canonicalValue = canonicalJson(observation.canonicalValue); this.database.prepare("INSERT INTO research_observations VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(observationId, id, requiredText(observation.subjectType, "subjectType", 100), requiredText(observation.subjectKey, "subjectKey", 300), requiredText(observation.metric, "metric", 160), observation.valueType, canonicalValue, observation.unit ?? null, observation.provider ?? null, observation.providerVersion ?? null, observation.observedAt, canonicalJson(observation.evidenceRefs ?? []), digest({ ...observation, canonicalValue: observation.canonicalValue })); }
+      this.database.prepare("INSERT INTO idempotency_keys VALUES (?, 'seal-research-snapshot', ?, ?)").run(input.idempotencyKey, requestDigest, id);
+    })();
+    return this.getResearchSnapshot(projectId, id);
+  }
+
+  getResearchSnapshot(projectId: string, snapshotId: string): ResearchSnapshot {
+    this.requireResearchProject(projectId); const row = this.database.prepare("SELECT * FROM research_snapshots WHERE id=? AND project_id=?").get(snapshotId, projectId) as Record<string, string | number | null> | undefined;
+    if (!row) throw new PortfolioError("research_snapshot_not_found");
+    return { id: String(row.id), projectId: String(row.project_id), runId: String(row.run_id), sequence: Number(row.sequence), state: String(row.state) as ResearchSnapshot["state"], capturedAt: String(row.captured_at), sealedAt: String(row.sealed_at), supersedesSnapshotId: row.supersedes_snapshot_id === null ? null : String(row.supersedes_snapshot_id), canonicalPayload: jsonObject(String(row.canonical_payload_json)), canonicalPayloadDigest: String(row.canonical_payload_digest), diagnosticSummary: jsonObject(String(row.diagnostic_summary_json)) };
+  }
+
+  listResearchObservations(projectId: string): ResearchObservation[] {
+    this.requireResearchProject(projectId); const rows = this.database.prepare("SELECT o.* FROM research_observations o JOIN research_snapshots s ON s.id=o.snapshot_id WHERE s.project_id=? ORDER BY o.observed_at, o.id").all(projectId) as Record<string, string | null>[];
+    return rows.map((row) => ({ id: String(row.id), snapshotId: String(row.snapshot_id), subjectType: String(row.subject_type), subjectKey: String(row.subject_key), metric: String(row.metric), valueType: String(row.value_type) as ResearchObservation["valueType"], canonicalValue: JSON.parse(String(row.canonical_value_json)), unit: row.unit, provider: row.provider, providerVersion: row.provider_version, observedAt: String(row.observed_at), evidenceRefs: jsonStrings(String(row.evidence_refs_json)), observationDigest: String(row.observation_digest) }));
+  }
+
+  recordResearchEvaluation(projectId: string, input: RecordResearchEvaluationInput): ResearchEvaluation {
+    this.requireResearchProject(projectId); this.getResearchSnapshot(projectId, input.snapshotId); const prior = this.idempotent(input.idempotencyKey, "record-research-evaluation", { projectId, ...input }); if (prior) return this.getResearchHistory(projectId).evaluations.find((item) => item.id === prior)!;
+    const id = randomUUID(); const createdAt = new Date().toISOString(); this.database.transaction(() => { this.database.prepare("INSERT INTO research_evaluations VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(id, projectId, input.snapshotId, requiredText(input.evaluationType, "evaluationType", 160), requiredText(input.policyRef, "policyRef", 200), input.engineRef ?? null, input.evaluationAsOf, canonicalJson(input.requestPayload), digest(input.requestPayload), canonicalJson(input.resultPayload), digest(input.resultPayload), createdAt); this.database.prepare("INSERT INTO idempotency_keys VALUES (?, 'record-research-evaluation', ?, ?)").run(input.idempotencyKey, digest({ projectId, ...input }), id); })(); return this.getResearchHistory(projectId).evaluations.find((item) => item.id === id)!;
+  }
+
+  recordResearchDecision(projectId: string, input: RecordResearchDecisionInput): ResearchDecision {
+    this.requireResearchProject(projectId); const history = this.getResearchHistory(projectId); if (input.evaluationId && !history.evaluations.some((item) => item.id === input.evaluationId)) throw new PortfolioError("research_evaluation_not_found"); if (input.supersedesDecisionId && !history.decisions.some((item) => item.id === input.supersedesDecisionId)) throw new PortfolioError("research_decision_not_found"); const prior = this.idempotent(input.idempotencyKey, "record-research-decision", { projectId, ...input }); if (prior) return this.getResearchHistory(projectId).decisions.find((item) => item.id === prior)!;
+    const id = randomUUID(); this.database.transaction(() => { this.database.prepare("INSERT INTO research_decisions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(id, projectId, input.evaluationId ?? null, input.decision, requiredText(input.rationale, "rationale", 2000), canonicalJson(input.selectedSubjectRefs ?? []), canonicalJson(input.requestedFollowUp ?? []), requiredText(input.actorRef, "actorRef", 200), input.decidedAt, input.supersedesDecisionId ?? null); this.database.prepare("INSERT INTO idempotency_keys VALUES (?, 'record-research-decision', ?, ?)").run(input.idempotencyKey, digest({ projectId, ...input }), id); })(); return this.getResearchHistory(projectId).decisions.find((item) => item.id === id)!;
+  }
+
+  getResearchHistory(projectId: string): ResearchHistory {
+    this.requireResearchProject(projectId);
+    const runs = (this.database.prepare("SELECT id FROM research_runs WHERE project_id=? ORDER BY started_at, id").all(projectId) as { id: string }[]).map((row) => this.getResearchRun(projectId, row.id));
+    const snapshots = (this.database.prepare("SELECT id FROM research_snapshots WHERE project_id=? ORDER BY sequence, id").all(projectId) as { id: string }[]).map((row) => this.getResearchSnapshot(projectId, row.id));
+    const evaluations = (this.database.prepare("SELECT * FROM research_evaluations WHERE project_id=? ORDER BY created_at, id").all(projectId) as Record<string, string | null>[]).map((row): ResearchEvaluation => ({ id: String(row.id), projectId: String(row.project_id), snapshotId: String(row.snapshot_id), evaluationType: String(row.evaluation_type), policyRef: String(row.policy_ref), engineRef: row.engine_ref, evaluationAsOf: String(row.evaluation_as_of), requestPayload: jsonObject(String(row.request_payload_json)), requestDigest: String(row.request_digest), resultPayload: jsonObject(String(row.result_payload_json)), resultDigest: String(row.result_digest), createdAt: String(row.created_at) }));
+    const decisions = (this.database.prepare("SELECT * FROM research_decisions WHERE project_id=? ORDER BY decided_at, id").all(projectId) as Record<string, string | null>[]).map((row): ResearchDecision => ({ id: String(row.id), projectId: String(row.project_id), evaluationId: row.evaluation_id, decision: String(row.decision) as ResearchDecision["decision"], rationale: String(row.rationale), selectedSubjectRefs: jsonStrings(String(row.selected_subject_refs_json)), requestedFollowUp: jsonStrings(String(row.requested_follow_up_json)), actorRef: String(row.actor_ref), decidedAt: String(row.decided_at), supersedesDecisionId: row.supersedes_decision_id }));
+    return { runs, snapshots, observations: this.listResearchObservations(projectId), evaluations, decisions };
   }
 
   updateProject(id: string, input: UpdateProjectInput): PortfolioProject {
@@ -205,6 +303,9 @@ export function openPortfolioRepository(root: string): PortfolioRepository {
   if (!existsSync(path)) throw new PortfolioError("portfolio_uninitialized");
   const database = createSqliteDatabase(path);
   database.exec("PRAGMA foreign_keys = ON");
+  const version = database.prepare("PRAGMA user_version").get() as { user_version: number };
+  if (Number(version.user_version) > 2) { database.close(); throw new PortfolioError("schema_version_unsupported"); }
+  database.exec(PORTFOLIO_SCHEMA);
   return new PortfolioRepository(database, root);
 }
 

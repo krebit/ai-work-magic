@@ -55,5 +55,35 @@ CREATE TABLE IF NOT EXISTS artifact_versions (
   UNIQUE(artifact_id, version),
   UNIQUE(artifact_id, sha256)
 );
-PRAGMA user_version = 1;
+CREATE TABLE IF NOT EXISTS research_runs (
+  id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), research_type TEXT NOT NULL,
+  status TEXT NOT NULL, trigger TEXT NOT NULL, request_payload_json TEXT NOT NULL, request_digest TEXT NOT NULL,
+  started_at TEXT NOT NULL, completed_at TEXT, created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS research_snapshots (
+  id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), run_id TEXT NOT NULL REFERENCES research_runs(id),
+  sequence INTEGER NOT NULL, state TEXT NOT NULL, captured_at TEXT NOT NULL, sealed_at TEXT NOT NULL,
+  supersedes_snapshot_id TEXT REFERENCES research_snapshots(id), canonical_payload_json TEXT NOT NULL,
+  canonical_payload_digest TEXT NOT NULL, diagnostic_summary_json TEXT NOT NULL, UNIQUE(project_id, sequence)
+);
+CREATE TABLE IF NOT EXISTS research_observations (
+  id TEXT PRIMARY KEY, snapshot_id TEXT NOT NULL REFERENCES research_snapshots(id), subject_type TEXT NOT NULL,
+  subject_key TEXT NOT NULL, metric TEXT NOT NULL, value_type TEXT NOT NULL, canonical_value_json TEXT NOT NULL,
+  unit TEXT, provider TEXT, provider_version TEXT, observed_at TEXT NOT NULL, evidence_refs_json TEXT NOT NULL,
+  observation_digest TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS research_observation_lookup ON research_observations(subject_type, subject_key, metric, observed_at);
+CREATE TABLE IF NOT EXISTS research_evaluations (
+  id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), snapshot_id TEXT NOT NULL REFERENCES research_snapshots(id),
+  evaluation_type TEXT NOT NULL, policy_ref TEXT NOT NULL, engine_ref TEXT, evaluation_as_of TEXT NOT NULL,
+  request_payload_json TEXT NOT NULL, request_digest TEXT NOT NULL, result_payload_json TEXT NOT NULL,
+  result_digest TEXT NOT NULL, created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS research_decisions (
+  id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), evaluation_id TEXT REFERENCES research_evaluations(id),
+  decision TEXT NOT NULL, rationale TEXT NOT NULL, selected_subject_refs_json TEXT NOT NULL,
+  requested_follow_up_json TEXT NOT NULL, actor_ref TEXT NOT NULL, decided_at TEXT NOT NULL,
+  supersedes_decision_id TEXT REFERENCES research_decisions(id)
+);
+PRAGMA user_version = 2;
 `;

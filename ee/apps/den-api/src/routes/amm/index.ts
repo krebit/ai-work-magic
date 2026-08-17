@@ -405,6 +405,26 @@ export function registerAmmRoutes<T extends { Variables: AmmRouteVariables }>(
           maximumUnits: input.limits.maxUnits,
         })
         reservedOperation = reserved
+        // A completed operation is a terminal idempotent replay. Return the
+        // same public operation/result without reserving quota or starting a
+        // second downstream run.
+        if (reserved.state === "completed" && reserved.ammRunId) {
+          const run = validateRunResponse(
+            await client.getRun(reserved.ammRunId, { requestId: c.get("requestId") }),
+          )
+          await reconcileTerminalRun({
+            organizationId: organization.organization.id,
+            operation: reserved,
+            run,
+            service,
+          })
+          return c.json(publicRunResponse({
+            operationId: reserved.id,
+            state: run.state,
+            result: run.result,
+            usage: run.usage,
+          }))
+        }
         const operation = await service.beginAmmOperationStart({
           organizationId: organization.organization.id,
           operationId: reserved.id,

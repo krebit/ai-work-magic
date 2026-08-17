@@ -113,6 +113,23 @@ A research project owns append-only runs, immutable snapshots, typed timestamped
 
 The schema is deliberately generic: vertical integrations own collection and scoring rules, while this repository preserves their canonical payloads and digests. Den and hosted APIs may own the global corpus, quotas, and billing; the user's private research copy stays in `<workspace>/.amm/portfolio.sqlite`.
 
+#### KDP niche research
+
+The installed `kdp-niche-research` skill is the canonical example of a durable
+research workflow. It discovers the native Den AMM operations, collects a
+bounded keyword result, and validates the returned versioned payload before
+writing local history. A successful run creates or reuses exactly one
+`kind: "research"`, `vertical: "amazon-kdp"` project, then appends a terminal
+run, immutable snapshot, typed observations, evaluation, and a linked Markdown
+brief artifact. The brief is a human-readable evidence view; the Portfolio
+snapshot and evaluation remain canonical.
+
+The workflow never creates a book project or records a research decision on
+its own. An explicit `accept`, `reject`, or `more-research` choice is required
+before a decision is persisted. Den operation IDs and downstream AMM run IDs
+are kept out of browser-visible prompts and artifacts, and retries reuse the
+same idempotency key without creating another paid execution.
+
 ### Session context
 
 An OpenCode session can be associated with either:

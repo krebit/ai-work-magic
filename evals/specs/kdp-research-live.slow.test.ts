@@ -680,8 +680,13 @@ test("KDP research flows through Den and real AMM providers into the local Portf
     [orgId],
   );
 
-  await using desktopApp = await app({ den, as: "admin", place, model });
-  await installBrowserResponseWitness(desktopApp);
+  await using desktopApp = await app({
+    den,
+    as: "admin",
+    place,
+    model,
+    beforeSignIn: installBrowserResponseWitness,
+  });
   const alternateWorkspace = await createAndSelectWorkspace(desktopApp, { path: alternateWorkspacePath });
   const activeWorkspace = await createAndSelectWorkspace(desktopApp, { path: activeWorkspacePath });
   const alternateBefore = await localJson(desktopApp, alternateWorkspace.workspaceId, "/portfolio", localApiBodies);
@@ -703,11 +708,6 @@ test("KDP research flows through Den and real AMM providers into the local Portf
     timeoutMs: 30_000,
     label: "visible OpenWork Cloud MCP health",
   });
-  await captureVisual(desktopApp, [
-    "The OpenWork Cloud MCP health section is visible for the active workspace",
-    "The cloud connection is ready and no connection failure is visible",
-    "No credential, service key, or authorization token is visible",
-  ], shots);
 
   const mcpToken = await mintMcpToken(den.admin, orgId);
   const searchResult = toolJson(await callTool(den.ref.apiUrl, mcpToken, "search_capabilities", {
@@ -733,12 +733,6 @@ test("KDP research flows through Den and real AMM providers into the local Portf
   await openNewChat(desktopApp, activeWorkspace.workspaceId);
   await selectKdpSkillAndSend(desktopApp);
   expect(await assistantTranscript(desktopApp)).toContain(exactPrompt);
-  await captureVisual(desktopApp, [
-    "The exact fantasy romance managed KDP research request is visible in chat",
-    "The request shows the kdp-niche-research skill and the limits of 20 units, 3 results, 3 products, and 1 page",
-    "The request explicitly stops before decisions, books, manuscripts, and publication",
-    "No credential, service key, or authorization token is visible",
-  ], shots);
 
   const operationRows = await eventually(() => denQuery(
     denDatabase.url,
@@ -858,12 +852,6 @@ test("KDP research flows through Den and real AMM providers into the local Portf
   expect(assistantReply).toMatch(/20\d{2}-\d{2}-\d{2}|observed at|as of/i);
   const chatTranscript = await assistantTranscript(desktopApp);
   expect(chatTranscript).toContain(exactPrompt);
-  await captureVisual(desktopApp, [
-    "The terminal assistant reply visibly reports demand and competition evidence with source timing",
-    "The reply visibly reports diagnostics and transparent score inputs or calculation",
-    "The reply asks for an explicit human review or approval before any consequential next step",
-    "No credential, service key, or authorization token is visible",
-  ], shots);
 
   const portfolio = await eventually(() => localJson(desktopApp, activeWorkspace.workspaceId, "/portfolio", localApiBodies), {
     within: 60_000,
@@ -1114,12 +1102,6 @@ test("KDP research flows through Den and real AMM providers into the local Portf
   });
   const historyUi = await evalIn(desktopApp, `document.querySelector('[aria-label="Research history"]')?.textContent ?? ""`);
   const historyUiText = typeof historyUi === "string" ? historyUi : "";
-  await captureVisual(desktopApp, [
-    "Portfolio Research history visibly shows the terminal KDP run and immutable snapshot",
-    "Research history visibly shows typed observations, the evaluation score, and linked brief evidence",
-    "Research history visibly states that no decision has been recorded",
-    "No credential, service key, or authorization token is visible",
-  ], shots);
 
   const portfolioYaml = await readFile(join(activeWorkspacePath, "portfolio.yaml"), "utf8");
   const portfolioSqlite = await readFile(join(activeWorkspacePath, ".amm", "portfolio.sqlite"));
@@ -1144,6 +1126,17 @@ test("KDP research flows through Den and real AMM providers into the local Portf
     ]),
   ];
   for (const surface of secretSurfaces) assertSecretAbsent(surface.label, surface.value, serviceKey, keyFingerprint);
+  // Only capture visual evidence after all runtime/artifact surfaces have
+  // passed the local secret scan. Scan the resulting PNG/text immediately as
+  // well, so a regression cannot upload or retain a credential-bearing shot.
+  await captureVisual(desktopApp, [
+    "Portfolio Research history visibly shows the terminal KDP run, immutable snapshot, evaluation, and linked brief evidence",
+    "No credential, service key, or authorization token is visible",
+  ], shots);
+  for (const shot of shots) {
+    assertSecretAbsent("post-scan screenshot text", shot.visibleText, serviceKey, keyFingerprint);
+    assertSecretAbsent("post-scan screenshot PNG", shot.png, serviceKey, keyFingerprint);
+  }
   expect(denLog).toContain("/mcp/agent");
   evidence.fact(
     "The Den-to-AMM service key stays out of every user and evidence surface",

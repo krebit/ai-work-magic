@@ -274,7 +274,7 @@ function idempotentReservation(existing: AmmOperation, requestDigest: string) {
   if (existing.requestDigest !== requestDigest) {
     throw new AmmServiceError("amm_operation_conflict")
   }
-  if (existing.state === "cancelled" || existing.state === "completed") {
+  if (existing.state === "cancelled") {
     throw new AmmServiceError("amm_operation_state_conflict")
   }
   return existing

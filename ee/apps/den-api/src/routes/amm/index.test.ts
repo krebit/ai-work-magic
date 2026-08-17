@@ -743,14 +743,15 @@ describe("AMM native routes", () => {
     const secondRetry = await postJson(app, "/v1/amm/kdp/keyword-collections", startBody())
 
     expect(firstRetry.status).toBe(200)
-    expect(secondRetry.status).toBe(409)
-    expect(await firstRetry.json()).toEqual({
+    expect(secondRetry.status).toBe(200)
+    const terminalPayload = {
       operationId: witness.startCalls[0]?.idempotencyKey,
       state: "succeeded",
       result: publicTerminalCollectionResult,
       usage: { capabilityUnits: 7, providerCalls: 3, upstreamCostUsd: "1.25" },
-    })
-    expect(await secondRetry.json()).toEqual({ error: "amm_operation_state_conflict" })
+    }
+    expect(await firstRetry.json()).toEqual(terminalPayload)
+    expect(await secondRetry.json()).toEqual(terminalPayload)
     expect(store.ledgerEntries.size).toBe(1)
     expect(reconciliationCalls).toBe(1)
     expect(witness.startCalls).toHaveLength(1)

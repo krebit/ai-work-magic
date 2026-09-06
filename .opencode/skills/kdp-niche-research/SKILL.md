@@ -36,11 +36,12 @@ substitute an AMM run identifier for a Den operation identifier.
    `vertical: "amazon-kdp"`, and a stable title derived from the normalized
    niche, `lifecycleStage: "research"`, and a stable project idempotency key.
    Do not create a `book` project.
-3. Search Den for exactly `kdp keyword research observations`. Use only exact
+3. Use `openwork-cloud_search_capabilities` to search Den for exactly `kdp keyword research observations`. Use only exact
    capability names returned by that search, and require
    `startAmmKdpKeywordCollection`, `getAmmResearchOperation`,
    `getAmmKdpKeywordObservations`, and `scoreAmmKdpKeywords`. If any is
-   unavailable, report the missing operation and do not claim it ran.
+    unavailable, report the missing operation and do not claim it ran. Execute
+    the selected operation only through `openwork-cloud_execute_capability`.
 4. Build one immutable canonical request payload and its digest. Before any paid
    execution, call `portfolio.research.run.create` with the research project,
    a stable local idempotency key, `researchType` set to

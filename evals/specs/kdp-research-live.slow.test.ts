@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
+import { createDenTypeId } from "../../ee/packages/utils/src/typeid.js";
 import { copyFile, mkdir, readFile, readdir, stat } from "node:fs/promises";
 import { createServer } from "node:http";
 import type { IncomingHttpHeaders, IncomingMessage } from "node:http";
@@ -13,6 +14,8 @@ import {
   denFetch,
   evalIn,
   go,
+  readAvailableModels,
+  selectModel,
   waitFor,
 } from "@openwork/behaviors";
 import type { DenSession } from "@openwork/behaviors";
@@ -21,13 +24,22 @@ import { screenshot, validate } from "@openwork/fraimz";
 import type { Shot } from "@openwork/fraimz";
 import { app, eventually, needs, server, test } from "@openwork/testkit";
 
+class SkipError extends Error {
+  readonly reason: string;
+  constructor(reason: string) {
+    super(`needs: ${reason}`);
+    this.name = "SkipError";
+    this.reason = reason;
+  }
+}
+
 const execFileAsync = promisify(execFile);
 const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
 const ammRepoRoot = fileURLToPath(new URL("../../../ai-api-magic", import.meta.url));
 const skillSource = join(repoRoot, ".opencode", "skills", "kdp-niche-research", "SKILL.md");
 const defaultAmmApiBaseUrl = "http://127.0.0.1:3000";
 const defaultAmmDatabaseUrl = "postgres://postgres:postgres@127.0.0.1:55432/amm_api";
-const exactPrompt = "Research the Amazon.com paperback niche \"fantasy romance\" using the managed KDP capability and real provider evidence. Use at most 20 capability units, 3 search results, 3 enriched products, and 1 page. Record the validated result in one local Portfolio research project using the canonical research history, and register the final Markdown niche brief as linked evidence. Do not record a decision, create a book project or manuscript, publish, or spend beyond this research request.";
+const exactPrompt = "Use the OpenWork Cloud MCP tools to complete this request, not a prose-only answer. First call openwork-cloud_search_capabilities for KDP keyword research, then call openwork-cloud_execute_capability with the exact returned startAmmKdpKeywordCollection capability. Wait for the managed operation to finish before replying. Research the Amazon.com paperback niche \"fantasy romance\" using real provider evidence. Use collection intent refresh and evidence level standard. Use at most 20 capability units, 3 search results, 3 enriched products, and 1 page. Record the validated result in one local Portfolio research project using the canonical research history, and register the final Markdown niche brief as linked evidence. Do not record a decision, create a book project or manuscript, publish, or spend beyond this research request.";
 const terminalAmmStates = new Set(["succeeded", "partially_succeeded"]);
 const terminalPortfolioStatusByAmmState: Record<string, string> = {
   succeeded: "completed",
@@ -102,8 +114,8 @@ function jsonObject(value: unknown): Record<string, unknown> {
   return isRecord(parsed) ? { ...parsed } : {};
 }
 
-function requiredEnvironment(name: string): string {
-  const value = process.env[name]?.trim();
+function requiredEnvironment(name: string, alias?: string): string {
+  const value = process.env[name]?.trim() || (alias ? process.env[alias]?.trim() : undefined);
   if (!value) throw new Error(`${name} was required after needs() completed.`);
   return value;
 }
@@ -261,7 +273,7 @@ async function seedLiveAmmOrganization(databaseUrl: string, organizationId: stri
   const metadata = jsonObject(organizations[0]?.metadata);
   const features = jsonObject(metadata.features);
   const seededMetadata = { ...metadata, features: { ...features, ammResearch: true } };
-  const bucketId = `aub_${randomUUID().replaceAll("-", "").slice(0, 26)}`;
+  const bucketId = createDenTypeId("ammUsageBucket");
   const now = new Date();
   const windowStart = new Date(now.getTime() - 60_000);
   const windowEnd = new Date(now.getTime() + 24 * 60 * 60 * 1_000);
@@ -433,6 +445,28 @@ async function readCloudMcpHealth(surface: Surface, workspaceId: string): Promis
   return requireRecord(parseJson(raw, "Cloud MCP health response"), "Cloud MCP health response");
 }
 
+async function resolveWorkspacePath(surface: Surface, workspaceId: string): Promise<string> {
+  const rawWs = await evalIn(surface, `(async () => {
+    const port = localStorage.getItem("openwork.server.port");
+    const token = localStorage.getItem("openwork.server.token");
+    if (!port || !token) return JSON.stringify({ error: "missing local server credentials" });
+    const response = await fetch(
+      "http://127.0.0.1:" + port + "/workspaces",
+      { headers: { Authorization: "Bearer " + token } },
+    );
+    if (!response.ok) return JSON.stringify({ error: "HTTP " + response.status });
+    return response.text();
+  })()`, { awaitPromise: true, timeoutMs: 30_000 });
+  if (typeof rawWs !== "string") throw new Error("Workspace list response was not text.");
+  const envelope = requireRecord(parseJson(rawWs, "Workspace list"), "Workspace list");
+  const items = Array.isArray(envelope.items) ? envelope.items : [];
+  const match = items.find((item: Record<string, unknown>) => item.id === workspaceId);
+  if (!match || typeof match.path !== "string" || !match.path) {
+    throw new Error(`Workspace ${workspaceId} not found or missing path in workspace list.`);
+  }
+  return match.path;
+}
+
 function cloudMcpIsReady(health: Record<string, unknown>): boolean {
   const engine = isRecord(health.engine) ? health.engine : null;
   const tools = isRecord(health.tools) ? health.tools : null;
@@ -480,8 +514,29 @@ async function initializePortfolioUi(surface: Surface, workspaceId: string): Pro
   });
   const uninitialized = await evalIn(surface, `document.body.innerText.includes("Create this workspace’s portfolio")`);
   if (uninitialized === true) {
-    expect(await setInput(surface, "Portfolio name", "KDP Live Research")).toBe(true);
-    expect(await clickText(surface, "Create portfolio")).toBe(true);
+    const typed = await evalIn(surface, `(() => {
+      const input = document.querySelector('input[aria-label="Portfolio name"]');
+      if (!(input instanceof HTMLInputElement)) return false;
+      const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+      if (nativeSetter) {
+        input.focus();
+        nativeSetter.call(input, "KDP Live Research");
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+      } else {
+        input.focus();
+        input.select();
+        document.execCommand("insertText", false, "KDP Live Research");
+      }
+      return true;
+    })()`);
+    expect(typed).toBe(true);
+    await waitFor(surface, `(() => {
+      const input = document.querySelector('input[aria-label="Portfolio name"]');
+      const btn = [...document.querySelectorAll("button")].find((b) => (b.textContent ?? "").trim() === "Create portfolio");
+      return input instanceof HTMLInputElement && input.value === "KDP Live Research" && btn instanceof HTMLButtonElement && !btn.disabled;
+    })()`, { timeoutMs: 15_000, label: "enabled Create portfolio button with value" });
+    await clickText(surface, "Create portfolio");
   }
   await waitFor(surface, `document.body.innerText.includes("KDP Live Research")`, {
     timeoutMs: 30_000,
@@ -490,6 +545,11 @@ async function initializePortfolioUi(surface: Surface, workspaceId: string): Pro
 }
 
 async function openNewChat(surface: Surface, workspaceId: string): Promise<string> {
+  await waitFor(surface, `window.__openworkControl?.listActions().some((action) =>
+    action.id === "session.create_task" && !action.disabled)`, {
+    timeoutMs: 60_000,
+    label: "enabled session.create_task action",
+  });
   await control(surface, "session.create_task");
   const listed = await control(surface, "session.list_sessions");
   const sessions = Array.isArray(listed) ? listed.filter(isRecord) : [];
@@ -505,7 +565,7 @@ async function openNewChat(surface: Surface, workspaceId: string): Promise<strin
   return sessionId;
 }
 
-async function selectKdpSkillAndSend(surface: Surface): Promise<void> {
+async function selectKdpSkillAndSend(surface: Surface, workspaceId: string): Promise<void> {
   await control(surface, "composer.set_text", { text: exactPrompt }, { timeoutMs: 30_000 });
   await waitFor(surface, `(() => {
     const plug = document.querySelector('button[title="Commands, skills, and MCPs"]');
@@ -548,8 +608,9 @@ async function selectKdpSkillAndSend(surface: Surface): Promise<void> {
 }
 
 async function assistantTranscript(surface: Surface): Promise<string> {
-  const value = await evalIn(surface, `(() => [...document.querySelectorAll('[data-message-role]')]
-    .map((message) => (message.innerText ?? "").trim()).join("\n\n"))()`);
+  const NL = "\n";
+  const expr = `[...document.querySelectorAll('[data-message-role]')].map((m) => (m.innerText || "").trim()).join(${JSON.stringify(NL + NL)})`;
+  const value = await evalIn(surface, expr);
   return typeof value === "string" ? value : "";
 }
 
@@ -632,19 +693,24 @@ async function scanTapeForSecret(directory: string, secret: string, fingerprint:
 
 test("KDP research flows through Den and real AMM providers into the local Portfolio", async ({ evidence, place }) => {
   needs({
-    model: "tool-capable",
     optIn: ["OPENWORK_EVAL_APP_SPECS", "OPENWORK_EVAL_KDP_LIVE"],
     env: [
-      "DEN_TO_AMM_SERVICE_KEY",
       "DATAFORSEO_LOGIN",
       "DATAFORSEO_PASSWORD",
       "SERPAPI_API_KEY",
+      "OPENAI_API_KEY",
     ],
   });
+  if (!process.env.DEN_TO_AMM_SERVICE_KEY?.trim() && !process.env.LOCAL_API_KEY?.trim()) {
+    throw new SkipError("set DEN_TO_AMM_SERVICE_KEY or LOCAL_API_KEY");
+  }
 
-  const serviceKey = requiredEnvironment("DEN_TO_AMM_SERVICE_KEY");
+  const serviceKey = requiredEnvironment("DEN_TO_AMM_SERVICE_KEY", "LOCAL_API_KEY");
   const keyFingerprint = secretFingerprint(serviceKey);
-  const model = requiredEnvironment("OPENWORK_EVAL_MODEL");
+  // The live tenant may supply the model credential through its authenticated
+  // cloud connection. A host-level provider key is therefore optional; retain
+  // an override for local model-driven runs.
+  const model = process.env.OPENWORK_EVAL_MODEL?.trim() || "openai/gpt-4o";
   const runMarker = `kdp-live-${Date.now()}-${randomUUID().slice(0, 8)}`;
   const activeWorkspacePath = join("/tmp", `${runMarker}-active`);
   const alternateWorkspacePath = join("/tmp", `${runMarker}-alternate`);
@@ -665,6 +731,27 @@ test("KDP research flows through Den and real AMM providers into the local Portf
   const denDatabase = den.database;
   if (!denDatabase) throw new Error("The authoritative KDP live spec requires the local Den MySQL witness.");
   const orgId = await organizationId(den.admin);
+  const openAiProvider = await denFetch(den.admin, "/v1/llm-providers", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${den.admin.token}`,
+      "content-type": "application/json",
+      "x-openwork-org-id": orgId,
+    },
+    body: JSON.stringify({
+      name: "OpenAI",
+      source: "models_dev",
+      providerId: "openai",
+      modelIds: ["gpt-4o"],
+      apiKey: requiredEnvironment("OPENAI_API_KEY"),
+      allMembers: true,
+      memberIds: [],
+      teamIds: [],
+    }),
+  });
+  if (openAiProvider.response.status !== 201) {
+    throw new Error(`Creating the OpenAI provider failed: HTTP ${openAiProvider.response.status} ${openAiProvider.text.slice(0, 500)}`);
+  }
   const seededBucket = await seedLiveAmmOrganization(denDatabase.url, orgId);
   const memberRows = await denQuery(
     denDatabase.url,
@@ -687,6 +774,13 @@ test("KDP research flows through Den and real AMM providers into the local Portf
     model,
     beforeSignIn: installBrowserResponseWitness,
   });
+  // app() creates a workspace at /tmp/openwork-admin-${Date.now()}. The
+  // subsequent createAndSelectWorkspace calls will reuse that workspace rather
+  // than creating new ones (resolveWorkspaceId returns the existing ID). Copy
+  // the KDP skill into the actual workspace path so the skills API can find it.
+  const actualWorkspacePath = await resolveWorkspacePath(desktopApp, desktopApp.workspaceId);
+  await mkdir(join(actualWorkspacePath, ".opencode", "skills", "kdp-niche-research"), { recursive: true });
+  await copyFile(skillSource, join(actualWorkspacePath, ".opencode", "skills", "kdp-niche-research", "SKILL.md"));
   const alternateWorkspace = await createAndSelectWorkspace(desktopApp, { path: alternateWorkspacePath });
   const activeWorkspace = await createAndSelectWorkspace(desktopApp, { path: activeWorkspacePath });
   const alternateBefore = await localJson(desktopApp, alternateWorkspace.workspaceId, "/portfolio", localApiBodies);
@@ -698,6 +792,17 @@ test("KDP research flows through Den and real AMM providers into the local Portf
     until: cloudMcpIsReady,
   });
   expect(cloudMcpIsReady(health)).toBe(true);
+  const modelId = model.includes("/") ? model.slice(model.lastIndexOf("/") + 1) : model;
+  const availableModels = await eventually(() => readAvailableModels(desktopApp), {
+    within: 60_000,
+    label: "OpenAI model available in desktop",
+    until: (models) => models.some((entry) => entry.selectable && (entry.id === model || entry.id === modelId || entry.id.endsWith(`/${modelId}`))),
+  });
+  const selectedModel = availableModels.find((entry) => entry.selectable && (entry.id === model || entry.id === modelId || entry.id.endsWith(`/${modelId}`)));
+  if (!selectedModel) {
+    throw new Error(`The configured model ${model} was not selectable. Saw: ${availableModels.map((entry) => entry.id).join(", ")}`);
+  }
+  await selectModel(desktopApp, selectedModel.id);
   evidence.fact(
     "The signed-in workspace has a healthy openwork-cloud connection",
     `The runtime health witness reported phase=${String(health.phase)}, usable=${String(health.usable)}, and connected search/execute tools for workspace ${activeWorkspace.workspaceId}.`,
@@ -731,19 +836,40 @@ test("KDP research flows through Den and real AMM providers into the local Portf
   expect(requireRecord(initializedPortfolio, "initialized Portfolio").state).toBe("ready");
   expect(recordField(initializedPortfolio, "snapshot", "initialized Portfolio").projects).toEqual([]);
   await openNewChat(desktopApp, activeWorkspace.workspaceId);
-  await selectKdpSkillAndSend(desktopApp);
+  await selectKdpSkillAndSend(desktopApp, activeWorkspace.workspaceId);
   expect(await assistantTranscript(desktopApp)).toContain(exactPrompt);
 
-  const operationRows = await eventually(() => denQuery(
-    denDatabase.url,
-    `SELECT id, organization_id AS organizationId, org_membership_id AS memberId,
-      operation_key AS operationKey, operation, request_digest AS requestDigest,
-      amm_run_id AS ammRunId, state, reserved_units AS reservedUnits,
-      actual_units AS actualUnits, provider_calls AS providerCalls,
-      upstream_cost_usd AS upstreamCostUsd, completed_at AS completedAt
-    FROM amm_operations WHERE organization_id = ? ORDER BY created_at`,
-    [orgId],
-  ), {
+  const operationRows = await eventually(async () => {
+    const rows = await denQuery(
+      denDatabase.url,
+      `SELECT id, organization_id AS organizationId, org_membership_id AS memberId,
+        operation_key AS operationKey, operation, request_digest AS requestDigest,
+        amm_run_id AS ammRunId, state, reserved_units AS reservedUnits,
+        actual_units AS actualUnits, provider_calls AS providerCalls,
+        upstream_cost_usd AS upstreamCostUsd, completed_at AS completedAt
+      FROM amm_operations WHERE organization_id = ? ORDER BY created_at`,
+      [orgId],
+    );
+    const running = rows.find((row) => row.state === "running" && typeof row.id === "string");
+    if (running) {
+      await denFetch(den.admin, `/v1/amm/operations/${encodeURIComponent(String(running.id))}`, {
+        headers: {
+          authorization: `Bearer ${den.admin.token}`,
+          "x-openwork-org-id": orgId,
+        },
+      });
+    }
+    return denQuery(
+      denDatabase.url,
+      `SELECT id, organization_id AS organizationId, org_membership_id AS memberId,
+        operation_key AS operationKey, operation, request_digest AS requestDigest,
+        amm_run_id AS ammRunId, state, reserved_units AS reservedUnits,
+        actual_units AS actualUnits, provider_calls AS providerCalls,
+        upstream_cost_usd AS upstreamCostUsd, completed_at AS completedAt
+      FROM amm_operations WHERE organization_id = ? ORDER BY created_at`,
+      [orgId],
+    );
+  }, {
     within: 180_000,
     label: "one terminal Den KDP operation",
     until: (rows) => rows.some((row) => row.state === "completed"),

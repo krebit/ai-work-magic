@@ -203,7 +203,13 @@ export const AGENT_MCP_INSTRUCTIONS = [
 
 async function mcpRequestInfo(request: Request): Promise<{ method: string | null; resourceUri: string | null }> {
   if (request.method.toUpperCase() !== "POST") return { method: null, resourceUri: null }
-  const body: unknown = await request.clone().json().catch(() => null)
+  let body: unknown = null
+  try {
+    body = await request.clone().json()
+  } catch {
+    // Metadata inspection must not reject an otherwise valid MCP request when
+    // the runtime has already disturbed the incoming request stream.
+  }
   const method = typeof body === "object"
     && body !== null
     && "method" in body

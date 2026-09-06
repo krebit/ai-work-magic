@@ -12,6 +12,7 @@ export const REQUIRED_SECRETS = [
   {
     name: "DEN_TO_AMM_SERVICE_KEY",
     isPresent: (value) => typeof value === "string" && value.length >= 32,
+    alias: "LOCAL_API_KEY",
   },
   {
     name: "DATAFORSEO_LOGIN",
@@ -35,9 +36,13 @@ function secretStatus(name, environment) {
     throw new Error(`Unknown secret requirement: ${name}`);
   }
 
+  const primary = environment[name];
+  const aliasValue = requirement.alias ? environment[requirement.alias] : undefined;
+  const value = primary || aliasValue;
+
   return {
     name,
-    status: requirement.isPresent(environment[name]) ? "present" : "missing",
+    status: requirement.isPresent(value) ? "present" : "missing",
   };
 }
 

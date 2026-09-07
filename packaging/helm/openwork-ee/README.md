@@ -38,14 +38,19 @@ config:
     allowPublicSignup: "false"
     requireEmailVerification: "false"
   public:
+    # Single public Den web origin. The chart renders this as DEN_BASE_URL and
+    # den-api derives Better Auth, CORS/trusted origins, web-app hosts, API
+    # defaults, and MCP resource defaults from it.
     webOrigin: "https://openwork.example.com"
-    apiOrigin: "https://api.openwork.example.com"
-    mcpResourceUrl: "https://api.openwork.example.com/mcp"
+    # Leave these blank unless you intentionally expose a split Den API origin
+    # or need migration compatibility with an older topology.
+    apiOrigin: ""
+    mcpResourceUrl: ""
     mcpClaimNamespace: "https://openwork.example.com"
-    desktopDenBaseUrl: "https://openwork.example.com"
-    corsOrigins: "https://openwork.example.com,https://api.openwork.example.com"
-    betterAuthTrustedOrigins: "https://openwork.example.com"
-    webAppHosts: "openwork.example.com"
+    desktopDenBaseUrl: ""
+    corsOrigins: ""
+    betterAuthTrustedOrigins: ""
+    webAppHosts: ""
     bootstrapAdminEmails: "admin@example.com"
     # Self-hosted default: every organization gets install downloads.
     installLinksGatingEnabled: "false"
@@ -80,6 +85,27 @@ ingress:
     host: api.openwork.example.com
 ```
 
+### Upgrade note: public URL values
+
+Current chart versions make `config.public.webOrigin` the primary public URL.
+It renders as `DEN_BASE_URL`, and Den derives these values from it unless you
+set explicit compatibility overrides:
+
+- `BETTER_AUTH_URL`
+- `CORS_ORIGINS`
+- `DEN_BETTER_AUTH_TRUSTED_ORIGINS`
+- `DEN_WEB_APP_HOSTS`
+- `DEN_API_PUBLIC_URL`
+- `DEN_MCP_RESOURCE_URL`
+
+When upgrading an existing release, inspect your values file for the older
+split-origin keys under `config.public`. If your deployment is single-origin,
+remove `apiOrigin`, `mcpResourceUrl`, `desktopDenBaseUrl`, `corsOrigins`,
+`betterAuthTrustedOrigins`, and `webAppHosts` or set them to `""` so Den can
+derive them from `webOrigin`. Keep `apiOrigin`/`mcpResourceUrl` only when you
+intentionally expose a separate API origin for install-link exchange or external
+MCP clients.
+
 For private GHCR packages, authenticate before installing:
 
 ```bash
@@ -103,6 +129,99 @@ For local development from a repository checkout, render or install directly:
 helm template openwork-ee ./packaging/helm/openwork-ee -f values.prod.yaml
 helm upgrade --install openwork-ee ./packaging/helm/openwork-ee -f values.prod.yaml
 ```
+
+### Automations rollout
+
+The Helm chart advertises Automations as unavailable by default for self-hosted
+and customer-managed deployments. Availability and server shutdown are
+separate so a Den upgrade cannot remove routes beneath an older published
+Desktop:
+
+| `automationsEnabled` | `automationsRuntimeEnabled` | Behavior |
+| --- | --- | --- |
+| `"false"` | `"true"` | New Desktops hide Automations; legacy routes and scheduling remain available during the upgrade window. |
+| `"false"` | `"false"` | Automations are hard-disabled: routes, MCP resources, and scheduler startup are omitted. |
+| `"true"` | `"true"` | Automations are available and execute normally. |
+| `"true"` | `"false"` | The runtime shutdown wins and Desktop receives `automationsEnabled: false`. |
+
+Set both values explicitly when the deployment is ready to run Automations:
+
+```yaml
+config:
+  public:
+    automationsEnabled: "true"
+    automationsRuntimeEnabled: "true"
+```
+
+These render `DEN_AUTOMATIONS_ENABLED=true` and
+`DEN_AUTOMATIONS_RUNTIME_ENABLED=true` for Den. An entirely unconfigured Den
+keeps availability fail-closed while preserving the legacy runtime. When using
+raw environment variables, an explicit `DEN_AUTOMATIONS_ENABLED` value also
+becomes the runtime default: `false` is therefore a complete shutdown unless
+`DEN_AUTOMATIONS_RUNTIME_ENABLED=true` explicitly selects mixed-version
+compatibility. The chart always renders both values to make that choice
+unambiguous. Hosted OpenWork Cloud explicitly enables availability.
+
+Desktop v0.18.35 and newer consume the value from `/v1/me/desktop-config`, hide
+the Automation surface, and do not register a runner unless the value is
+explicitly true. Older clients predate that contract, so the runtime flag must
+remain true while they are in use even when availability is false.
+
+For an existing deployment, stage the upgrade so independently released Den
+and Desktop versions never observe an unintended flag state:
+
+1. Keep `config.public.automationsRuntimeEnabled: "true"` while any connected
+   Desktop is older than v0.18.35.
+2. Upgrade Den. Legacy Desktops retain their existing routes and scheduling;
+   compatible Desktops honor `automationsEnabled` from desktop config.
+3. Roll out Desktop v0.18.35 or newer to the whole deployment.
+4. To keep Automations, set both values to true. To disable them, set both
+   values to false only after the Desktop rollout is complete.
+
+New installations with no legacy Desktop clients can hard-disable Automations
+immediately by setting both values to false.
+
+### Dashboards rollout
+
+The organization-managed Dashboard is unavailable by default. Enable it for a
+self-hosted or customer-managed deployment with:
+
+```yaml
+config:
+  public:
+    dashboardsEnabled: "true"
+```
+
+The chart renders this value as `DEN_DASHBOARDS_ENABLED`. Raw environment-based
+deployments can set the same variable directly. Hosted environments use that
+same flag, so Dashboard availability does not depend on a per-device preference.
+Desktop reads `dashboardEnabled` from `/v1/me/desktop-config` and hides both the
+sidebar entry and route unless the server explicitly returns `true`.
+
+### OpenWork Web rollout
+
+OpenWork Web is unavailable by default for self-hosted and customer-managed
+deployments. OpenWork Cloud enables it in its deployment values with:
+
+```yaml
+config:
+  public:
+    openworkWebEnabled: "true"
+```
+
+The chart renders this value as `DEN_OPENWORK_WEB_ENABLED`. A raw environment
+deployment can set the same variable directly. Missing, blank, false, or an
+unrecognized value fails closed: Den omits Web from its advertised
+capabilities, the sidebar and Billing offer stay hidden, and Web billing routes
+return the deployment-unavailable response. Availability is deployment-wide;
+it does not depend on organization mode, Stripe-variable presence, or mutable
+organization metadata.
+
+Enabling the flag advertises the hosted product. The deployment must also
+configure `STRIPE_SECRET_KEY` and `STRIPE_OPENWORK_WEB_PRICE_ID` before the
+purchase action becomes available. This separate billing-readiness check keeps
+a partially configured hosted rollout visible but non-purchasable instead of
+mistaking secrets for an availability signal.
 
 Provider-specific starter guides:
 
@@ -597,16 +716,31 @@ config:
     bootstrapAdminEmails: "admin@acme.com"
 ```
 
-After the release is installed and the web host is reachable, sign up or sign in
-with one of the emails in `config.tenancy.ownerEmails`. If the singleton
-organization does not exist yet, Den creates it with `singleOrgName` and
-`singleOrgSlug`, then makes that eligible first user the organization owner.
+For releases that include initial-administrator bootstrap, inject the
+release-documented one-time setup secret through the chart's Secret integration.
+Do not put the setup code in Helm values, a ConfigMap, source control, logs, or a
+PR. After the release is installed and the web host is reachable, open `/setup`,
+enter an email configured in `config.tenancy.ownerEmails`, and verify it with the
+one-time operator code. Den then creates the Better Auth account, creates or
+claims the singleton organization identified by `singleOrgName` and
+`singleOrgSlug`, grants owner and configured platform-admin access, and consumes
+the setup claim. The code cannot be reused and public signup remains disabled.
+
+Configuring `ownerEmails` or `bootstrapAdminEmails` does not create an account or
+password. `ownerEmails` controls singleton-organization ownership;
+`bootstrapAdminEmails` controls platform-admin allowlist access. Configure the
+initial administrator in both lists when that person needs both roles.
+
+Chart versions without the `/setup` route do not support this private bootstrap
+flow. Upgrade to a release that includes initial-administrator bootstrap before
+attempting first-user setup; entering the configured email on the normal sign-in
+page cannot create the account and no default administrator password exists.
 
 Later users are attached to the same singleton organization. They do not see an
 organization creation step, and attempts to create another organization return a
-single-org-mode error. If no `ownerEmails` are configured, the first user who
-reaches the deployment can claim the owner role, so production deployments
-should set `ownerEmails` explicitly.
+single-org-mode error. If no eligible initial-administrator email is configured,
+the private setup flow remains unavailable; it never falls back to allowing an
+arbitrary first visitor to claim ownership.
 
 For most production installs, use this first owner account as the break-glass
 setup path, then configure SAML/OIDC SSO and SCIM from the organization

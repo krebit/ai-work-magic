@@ -2,6 +2,8 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
+import { TemporaryAuthNotice } from "../../(den)/_components/temporary-auth-notice";
+import { denApiCredentials, denApiEndpoint } from "../../(den)/_lib/den-api-origin";
 import { useOrgListWindow } from "../../(den)/_lib/use-org-list-window";
 
 type Organization = {
@@ -40,8 +42,9 @@ function getErrorMessage(payload: unknown, fallback: string) {
 }
 
 async function requestJson(path: string, init?: RequestInit) {
-  const response = await fetch(path, {
-    credentials: "include",
+  const endpoint = denApiEndpoint(path);
+  const response = await fetch(endpoint, {
+    credentials: denApiCredentials(endpoint),
     headers: { "content-type": "application/json", ...(init?.headers ?? {}) },
     ...init,
   });
@@ -119,7 +122,7 @@ export default function McpSelectOrganizationPage() {
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      const { response, payload } = await requestJson("/api/den/v1/me/orgs", {
+      const { response, payload } = await requestJson("/v1/me/orgs", {
         method: "GET",
       });
       if (cancelled) return;
@@ -285,6 +288,8 @@ export default function McpSelectOrganizationPage() {
               <p className="den-copy">{introCopy}</p>
             </div>
 
+            <TemporaryAuthNotice />
+
             {flowState === "loading" ? (
               <div className="h-2 overflow-hidden rounded-full bg-[var(--dls-hover)]">
                 <div className="h-full w-1/3 animate-pulse rounded-full bg-[var(--dls-accent)]" />
@@ -317,7 +322,7 @@ export default function McpSelectOrganizationPage() {
                     value={orgQuery}
                     onChange={(event) => setOrgQuery(event.target.value)}
                     placeholder="Search organizations"
-                    className="rounded-2xl border border-[var(--dls-border)] px-4 py-3 text-[14px] text-[var(--dls-text-primary)] outline-none transition focus:border-[var(--dls-accent)]"
+                    className="rounded-2xl border border-[var(--dls-border)] px-4 py-3 text-[14px] text-[var(--dls-text-primary)] outline-hidden transition focus:border-[var(--dls-accent)]"
                   />
                 ) : null}
 

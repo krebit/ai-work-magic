@@ -1,9 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { deriveMockEnv } from "../src/mock.ts";
-import { checkNeeds, needs, SkipError } from "../src/needs.ts";
-import { ephemeralDatabaseName, resolvePlace } from "../src/place.ts";
-import { trustedOrigins } from "../src/server.ts";
+import childProcess from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
+import {
+  checkNeeds,
+  deriveMockEnv,
+  ephemeralDatabaseName,
+  needs,
+  resolvePlace,
+  SkipError,
+  trustedOrigins,
+} from "@openwork/env";
 
 test("resolvePlace selects local unless OPENWORK_EVAL_DAYTONA is exactly 1", () => {
   const local = resolvePlace({});
@@ -47,6 +54,23 @@ test("needs only accepts opt-in gates set exactly to 1", () => {
   assert.doesNotThrow(() => checkNeeds({ optIn: ["EXACT_OPT_IN"] }, { EXACT_OPT_IN: "1" }));
 });
 
+test("needs reports an unavailable command", () => {
+  const command = "openwork-impossible-command-for-testkit-test";
+  assert.throws(
+    () => checkNeeds({ commands: [command] }, {}),
+    (error) => error instanceof SkipError && error.message.includes(`install ${command}`),
+  );
+});
+
+test("needs rejects a local-only test on Daytona or an attached Den", () => {
+  assert.doesNotThrow(() => checkNeeds({ placement: "local" }, {}));
+  assert.throws(() => checkNeeds({ placement: "local" }, { OPENWORK_EVAL_DAYTONA: "1" }), SkipError);
+  assert.throws(
+    () => checkNeeds({ placement: "local" }, { OPENWORK_EVAL_DEN_API_URL: "https://den.example.test" }),
+    SkipError,
+  );
+});
+
 test("needs reads process.env at the call site", () => {
   const name = "OPENWORK_TESTKIT_UNIT_RESOURCE";
   const previous = process.env[name];
@@ -84,4 +108,20 @@ test("ephemeral database names are valid and unique", () => {
   const names = new Set(Array.from({ length: 100 }, () => ephemeralDatabaseName()));
   assert.equal(names.size, 100);
   for (const name of names) assert.match(name, /^[a-z][a-z0-9_]{0,62}$/);
+});
+
+
+test("needs recognizes OpenSSL implementations that reject --version", (context) => {
+  const spawn = context.mock.method(childProcess, "spawnSync", (command: string, args: readonly string[]) => ({
+    pid: 0, output: [], stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), signal: null,
+    status: command === "openssl" && args[0] === "version" ? 0 : 1,
+  }));
+  syncBuiltinESMExports();
+  try {
+    assert.doesNotThrow(() => checkNeeds({ commands: ["openssl"] }, {}));
+    assert.equal(spawn.mock.callCount(), 1);
+  } finally {
+    spawn.mock.restore();
+    syncBuiltinESMExports();
+  }
 });

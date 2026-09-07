@@ -1,7 +1,7 @@
 import type { Surface } from "@openwork/cdp";
 import type { DenSession } from "./den.ts";
 import { denFetch } from "./den.ts";
-import { evalIn, fill, waitFor } from "./desktop.ts";
+import { control, evalIn, fill, waitFor } from "./desktop.ts";
 
 const MODEL_DIALOG = '[data-slot="dialog-content"]';
 const MODEL_SEARCH_INPUT = 'input[placeholder="Search providers and models..."]';
@@ -58,18 +58,6 @@ function stringField(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
 
-async function executeControl(app: Surface, action: string, args?: unknown): Promise<unknown> {
-  const result = await evalIn(
-    app,
-    `window.__openworkControl.execute(${JSON.stringify(action)}, ${JSON.stringify(args ?? null)})`,
-    { awaitPromise: true },
-  );
-  if (!isRecord(result) || result.ok !== true) {
-    throw new Error(`Desktop control action ${action} failed: ${isRecord(result) ? String(result.error ?? "unknown") : "unknown"}`);
-  }
-  return result.result;
-}
-
 async function openModelPicker(app: Surface): Promise<void> {
   const open = await evalIn(app, `Boolean(document.querySelector(${JSON.stringify(MODEL_SEARCH_INPUT)}))`).catch(() => false);
   if (open !== true) {
@@ -77,7 +65,7 @@ async function openModelPicker(app: Surface): Promise<void> {
       timeoutMs: 30_000,
       label: "session.model_picker.open enabled",
     });
-    await executeControl(app, "session.model_picker.open");
+    await control(app, "session.model_picker.open");
   }
   await waitFor(app, `Boolean(document.querySelector(${JSON.stringify(MODEL_SEARCH_INPUT)}))`, {
     timeoutMs: 30_000,
@@ -145,21 +133,39 @@ export async function readAvailableModels(app: Surface): Promise<ModelFacts[]> {
   return parseModels(value);
 }
 
-export async function selectModel(app: Surface, name: string): Promise<ModelFacts> {
+export async function selectModel(app: Surface, name: string, options?: { provider?: string }): Promise<ModelFacts> {
   await openModelPicker(app);
   await fill(app, MODEL_SEARCH_INPUT, name);
   await waitFor(app, `(() => {
     const dialog = document.querySelector(${JSON.stringify(MODEL_DIALOG)});
+    const expectedProvider = ${JSON.stringify(options?.provider?.trim())};
     return [...(dialog?.querySelectorAll("button") ?? [])].some((button) => {
       const id = button.querySelector("span.font-mono")?.textContent?.trim() ?? "";
-      return !button.disabled && (id === ${JSON.stringify(name)} || (button.textContent ?? "").includes(${JSON.stringify(name)}));
+      let group = button.parentElement;
+      while (group && !group.querySelector(':scope > div > button')) group = group.parentElement;
+      const providerHeader = group?.querySelector(':scope > div > button');
+      const providerName = providerHeader?.querySelector("span.text-dls-text")?.textContent?.trim()
+        ?? providerHeader?.textContent?.replace(/\\d+ models?.*$/, "").trim()
+        ?? "";
+      return !button.disabled
+        && (id === ${JSON.stringify(name)} || (button.textContent ?? "").includes(${JSON.stringify(name)}))
+        && (expectedProvider === undefined || providerName === expectedProvider);
     });
   })()`, { timeoutMs: 30_000, label: `selectable model ${name}` });
   const selected = await evalIn(app, `(() => {
     const dialog = document.querySelector(${JSON.stringify(MODEL_DIALOG)});
+    const expectedProvider = ${JSON.stringify(options?.provider?.trim())};
     const button = [...(dialog?.querySelectorAll("button") ?? [])].find((candidate) => {
       const id = candidate.querySelector("span.font-mono")?.textContent?.trim() ?? "";
-      return !candidate.disabled && (id === ${JSON.stringify(name)} || (candidate.textContent ?? "").includes(${JSON.stringify(name)}));
+      let group = candidate.parentElement;
+      while (group && !group.querySelector(':scope > div > button')) group = group.parentElement;
+      const providerHeader = group?.querySelector(':scope > div > button');
+      const providerName = providerHeader?.querySelector("span.text-dls-text")?.textContent?.trim()
+        ?? providerHeader?.textContent?.replace(/\\d+ models?.*$/, "").trim()
+        ?? "";
+      return !candidate.disabled
+        && (id === ${JSON.stringify(name)} || (candidate.textContent ?? "").includes(${JSON.stringify(name)}))
+        && (expectedProvider === undefined || providerName === expectedProvider);
     });
     if (!button) return null;
     const id = button.querySelector("span.font-mono")?.textContent?.trim() ?? "";
@@ -288,7 +294,7 @@ export async function seedUnavailableModel(app: Surface): Promise<UnavailableMod
     timeoutMs: 45_000,
     label: "eval.model_not_available.seed enabled",
   });
-  const value = await executeControl(app, "eval.model_not_available.seed");
+  const value = await control(app, "eval.model_not_available.seed");
   if (!isRecord(value) || !isRecord(value.unavailableModel) || !isRecord(value.availableModel)) {
     throw new Error(`Unavailable-model seed returned malformed facts: ${JSON.stringify(value)}`);
   }

@@ -9,6 +9,56 @@ function pathApi(platform) {
   return platform === "win32" ? path.win32 : path.posix;
 }
 
+function invalidWindowsWorkspaceRoot(value) {
+  const error = new TypeError(`Invalid Windows workspace root: ${value}`);
+  Object.defineProperty(error, "code", { value: "invalid_workspace_root" });
+  return error;
+}
+
+function isWindowsDeviceNamespace(value) {
+  return /^\\\\[?.]\\/.test(value);
+}
+
+/**
+ * Normalizes Windows verbatim drive and UNC paths without consulting the
+ * filesystem. Missing drives and disconnected shares must remain unchanged so
+ * callers can report their real accessibility error instead of resolving them
+ * against another drive.
+ */
+export function normalizeWorkspaceRootPath(value, opts) {
+  const trimmed = String(value ?? "").trim();
+  if (!trimmed || optionPlatform(opts) !== "win32") return trimmed;
+
+  const windowsPath = trimmed.replace(/\//g, "\\");
+  let normalized = windowsPath;
+  if (windowsPath.startsWith("\\\\?\\")) {
+    const verbatimPath = windowsPath.slice(4);
+    if (/^UNC(?:\\|$)/i.test(verbatimPath)) {
+      const uncPath = verbatimPath.slice(3).replace(/^\\/, "");
+      const [server, share] = uncPath.split("\\");
+      if (!server || !share) throw invalidWindowsWorkspaceRoot(trimmed);
+      normalized = `\\\\${uncPath}`;
+    } else {
+      if (!/^[A-Za-z]:\\/.test(verbatimPath)) throw invalidWindowsWorkspaceRoot(trimmed);
+      normalized = verbatimPath;
+    }
+  }
+
+  if (isWindowsDeviceNamespace(normalized)) {
+    throw invalidWindowsWorkspaceRoot(trimmed);
+  }
+
+  if (/^[A-Za-z]:(?!\\)/.test(normalized)) {
+    throw invalidWindowsWorkspaceRoot(trimmed);
+  }
+  if (normalized.startsWith("\\")) {
+    if (!normalized.startsWith("\\\\")) throw invalidWindowsWorkspaceRoot(trimmed);
+    const [server, share] = normalized.slice(2).split("\\");
+    if (!server || !share) throw invalidWindowsWorkspaceRoot(trimmed);
+  }
+  return normalized;
+}
+
 function optionEnv(opts) {
   return opts?.env ?? process.env;
 }
@@ -195,6 +245,30 @@ export function opencodeDataDirs(opts) {
     dirs.push(paths.join(appData, "opencode"));
   }
   return Array.from(new Set(dirs));
+}
+
+function truthy(value) {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
+}
+
+/** Candidate OpenCode databases in the same override/channel order used by OpenWork. */
+export function opencodeDbCandidates(opts) {
+  const env = optionEnv(opts);
+  const platform = optionPlatform(opts);
+  const paths = pathApi(platform);
+  const dirs = Array.from(new Set([...(opts?.dataDirs ?? []), ...opencodeDataDirs(opts)]));
+  const override = envValue(env, "OPENCODE_DB");
+  if (override) {
+    if (paths.isAbsolute(override)) return [override];
+    return dirs.map((dir) => paths.join(dir, override));
+  }
+
+  const channel = envValue(env, "OPENCODE_CHANNEL") || opts?.defaultChannel || "local";
+  const names = channel === "latest" || channel === "beta" || truthy(envValue(env, "OPENCODE_DISABLE_CHANNEL_DB"))
+    ? ["opencode.db"]
+    : [`opencode-${channel.replace(/[^a-zA-Z0-9._-]/g, "-")}.db`, "opencode.db"];
+  return dirs.flatMap((dir) => names.map((name) => paths.join(dir, name)));
 }
 
 export function opencodeCacheDirs(opts) {

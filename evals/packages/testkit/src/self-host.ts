@@ -6,13 +6,11 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { allocateFreePorts } from "@openwork/cdp";
+import { SkipError, ephemeralDatabaseName, localMysqlIsRunning, localRedisIsRunning, trustedOrigins } from "@openwork/env";
 import { freePort, killLocalPid } from "@openwork/hosts";
 import type { ChildProcess } from "node:child_process";
 import type { DenRef } from "@openwork/behaviors";
-import type { DbHandle, Place } from "./place.ts";
-import { SkipError } from "./needs.ts";
-import { ephemeralDatabaseName, localMysqlIsRunning, localRedisIsRunning } from "./place.ts";
-import { trustedOrigins } from "./server.ts";
+import type { DbHandle, Place } from "@openwork/env";
 
 const execFileAsync = promisify(execFile);
 const REPO_ROOT = fileURLToPath(new URL("../../../..", import.meta.url));
@@ -60,9 +58,15 @@ function spawnService(
   logPath: string,
 ): SpawnedService {
   const logFd = openSync(logPath, "a");
-  const child = spawn("pnpm", [script], {
+  const prepared = process.env.OPENWORK_EVAL_DEN_RUNTIME_PREPARED === "1";
+  const args = prepared
+    ? label === "den-api"
+      ? ["--filter", "@openwork-ee/den-api", "exec", "tsx", "src/main.ts"]
+      : ["--filter", "@openwork-ee/den-web", "exec", "next", "start", "--hostname", "127.0.0.1", "--port", String(port)]
+    : [script];
+  const child = spawn("pnpm", args, {
     cwd: REPO_ROOT,
-    env,
+    env: prepared && label === "den-api" ? { ...env, PORT: String(port) } : env,
     detached: true,
     stdio: ["ignore", logFd, logFd],
   });
@@ -125,16 +129,24 @@ async function waitForAuthProbe(ref: DenRef, service: SpawnedService): Promise<v
 // mirrored from server.ts (keep in sync)
 async function runDbPush(databaseUrl: string): Promise<void> {
   try {
-    await execFileAsync("pnpm", ["--filter", "@openwork-ee/den-db", "db:push"], {
-      cwd: REPO_ROOT,
-      env: {
-        ...process.env,
-        DATABASE_URL: databaseUrl,
-        DEN_DB_ENCRYPTION_KEY: DATABASE_ENCRYPTION_KEY,
-      },
-      maxBuffer: 16 * 1024 * 1024,
-      timeout: 180_000,
-    });
+    const commands = process.env.OPENWORK_EVAL_DEN_RUNTIME_PREPARED === "1"
+      ? [
+          ["--filter", "@openwork-ee/den-db", "exec", "node", "--import", "tsx", "./node_modules/drizzle-kit/bin.cjs", "push", "--config", "drizzle.config.ts"],
+          ["--filter", "@openwork-ee/den-db", "exec", "node", "--import", "tsx", "scripts/ensure-schema-repairs.ts"],
+        ]
+      : [["--filter", "@openwork-ee/den-db", "db:push"]];
+    for (const args of commands) {
+      await execFileAsync("pnpm", args, {
+        cwd: REPO_ROOT,
+        env: {
+          ...process.env,
+          DATABASE_URL: databaseUrl,
+          DEN_DB_ENCRYPTION_KEY: DATABASE_ENCRYPTION_KEY,
+        },
+        maxBuffer: 16 * 1024 * 1024,
+        timeout: 180_000,
+      });
+    }
   } catch (error) {
     const stderr = typeof error === "object" && error !== null && typeof Reflect.get(error, "stderr") === "string"
       ? Reflect.get(error, "stderr")
@@ -185,6 +197,7 @@ export async function selfHostServer(options: SelfHostServerOptions): Promise<Se
       DEN_DB_ENCRYPTION_KEY: DATABASE_ENCRYPTION_KEY,
       BETTER_AUTH_SECRET,
       BETTER_AUTH_URL: `http://localhost:${webPort}`,
+      DEN_BASE_URL: `http://localhost:${webPort}`,
       DEN_API_PUBLIC_URL: ref.apiUrl,
       DEN_API_PORT: String(apiPort),
       DEN_WEB_PORT: String(webPort),
@@ -210,6 +223,7 @@ export async function selfHostServer(options: SelfHostServerOptions): Promise<Se
       DEN_WEB_HOST: "127.0.0.1",
       ...commonEnv,
       DEN_API_BASE: `http://127.0.0.1:${apiPort}`,
+      DEN_BASE_URL: `http://localhost:${webPort}`,
       DEN_AUTH_ORIGIN: `http://localhost:${webPort}`,
       DEN_AUTH_FALLBACK_BASE: `http://127.0.0.1:${apiPort}`,
     }, join(logsDir, "web.log"));

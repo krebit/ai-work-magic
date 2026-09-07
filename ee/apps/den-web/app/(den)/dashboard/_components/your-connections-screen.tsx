@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type Ref } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { AlertTriangle, Check, Loader2, Plug, Wrench } from "lucide-react";
@@ -166,7 +166,7 @@ function YourConnectionRow({
   presets: ReturnType<typeof useMcpConnectionPresets>["data"];
   onSetup: (target: PluginMcpSetupTarget) => void;
   highlighted: boolean;
-  rowRef?: React.Ref<HTMLDivElement>;
+  rowRef?: Ref<HTMLDivElement>;
   polling: boolean;
   connecting: boolean;
   disconnecting: boolean;
@@ -197,7 +197,7 @@ function YourConnectionRow({
     <div
       ref={rowRef}
       tabIndex={highlighted ? -1 : undefined}
-      className={`outline-none transition ${highlighted ? "bg-blue-50/70 ring-2 ring-inset ring-blue-200" : ""}`}
+      className={`outline-hidden transition ${highlighted ? "bg-blue-50/70 ring-2 ring-inset ring-blue-200" : ""}`}
     >
       <div className="flex flex-col gap-4 px-6 py-4 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex min-w-0 flex-1 items-center gap-3">
@@ -291,7 +291,7 @@ function YourConnectionRow({
               className={buttonVariants({ variant: "secondary", size: "sm", className: "h-8 w-8 !px-0" })}
               aria-label={`Test tools for ${connection.name}`}
               title={`Test tools for ${connection.name}`}
-              data-testid={`toggle-mcp-tool-runner-${connection.id}`}
+              data-testid={`test-mcp-tools-${connection.id}`}
             >
               <Wrench className="h-3.5 w-3.5" aria-hidden="true" />
             </Link>

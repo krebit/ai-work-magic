@@ -30,6 +30,7 @@ import { useOrgDashboard } from "../_providers/org-dashboard-provider";
 import {
     buildGuidedCustomProviderConfig,
     buildGuidedProviderEnvName,
+    normalizeAzureResourceNameInput,
     parseGuidedModelIds,
     readEnvNamesFromCustomProviderText,
     readGuidedCustomProviderFields,
@@ -55,6 +56,7 @@ import {
     type DenModelsDevProviderDetail,
     type DenModelsDevProviderSummary,
 } from "./llm-provider-data";
+import { RuntimeEnvKeyChip, RuntimeEnvKeyNote, resolveRuntimeEnvKeys } from "./runtime-env-key";
 
 const SOURCE_TABS = [
     { value: "models_dev" as const, label: "Catalog provider", icon: Cpu },
@@ -830,6 +832,14 @@ export function LlmProviderEditorScreen({
     const providerEnv = catalogDetail
         ? getProviderEnvNames(catalogDetail.config)
         : [];
+    // What members' machines will actually read: catalog providers get a
+    // provider-specific tag once the row exists; until then it is a placeholder.
+    const runtimeEnvKeys = resolveRuntimeEnvKeys({
+        declaredEnvNames: providerEnv,
+        scoped: source === "models_dev",
+        saved: provider !== null && provider.source === "models_dev",
+        runtimeEnvKeys: provider?.runtimeEnvKeys ?? [],
+    });
 
     // Credential inputs shared by the standalone Credential section and the
     // guided custom form (where they render inline, before the endpoint).
@@ -840,14 +850,32 @@ export function LlmProviderEditorScreen({
                             Add a value for each one — values left blank keep
                             what is already saved.
                         </p>
+                        {credentialEnvNames.includes("AZURE_RESOURCE_NAME") ? (
+                            <div className="rounded-[22px] border border-sky-100 bg-sky-50 px-5 py-4 text-[13px] leading-6 text-sky-900">
+                                <p className="font-semibold">Azure resource name</p>
+                                <p className="mt-1 text-sky-800">
+                                    Azure Foundry may show a project URL such as{" "}
+                                    <code className="rounded-sm bg-white/70 px-1.5 py-0.5 font-mono text-[12px]">
+                                        https://yourFoundryResourceName.services.ai.azure.com/api/projects/your-project
+                                    </code>
+                                    . Paste that full URL here and we will save just the
+                                    resource name, for example{" "}
+                                    <code className="rounded-sm bg-white/70 px-1.5 py-0.5 font-mono text-[12px]">
+                                        yourFoundryResourceName
+                                    </code>
+                                    .
+                                </p>
+                            </div>
+                        ) : null}
                         {credentialEnvNames.map((envName) => {
                             const configured =
                                 provider?.configuredEnvKeys.includes(envName) ??
                                 false;
+                            const isAzureResourceName = envName === "AZURE_RESOURCE_NAME";
                             return (
                                 <label key={envName} className="grid gap-3">
                                     <span className="flex flex-wrap items-center gap-2 text-[14px] font-medium text-gray-700">
-                                        <code className="rounded bg-gray-100 px-2 py-0.5 font-mono text-[12px]">
+                                        <code className="rounded-sm bg-gray-100 px-2 py-0.5 font-mono text-[12px]">
                                             {envName}
                                         </code>
                                         {configured ? (
@@ -855,20 +883,24 @@ export function LlmProviderEditorScreen({
                                                 Saved
                                             </span>
                                         ) : null}
-                                    </span>
-                                    <DenInput
-                                        type="password"
+                                     </span>
+                                     <DenInput
+                                        type={isAzureResourceName ? "text" : "password"}
                                         value={apiKeyValues[envName] ?? ""}
                                         onChange={(event) =>
                                             setApiKeyValues((current) => ({
                                                 ...current,
-                                                [envName]: event.target.value,
+                                                [envName]: isAzureResourceName
+                                                    ? normalizeAzureResourceNameInput(event.target.value)
+                                                    : event.target.value,
                                             }))
                                         }
                                         placeholder={
                                             configured
                                                 ? "Leave blank to keep current value"
-                                                : `Paste the ${envName} value`
+                                                : isAzureResourceName
+                                                  ? "Paste the resource name or Azure Foundry project URL"
+                                                  : `Paste the ${envName} value`
                                         }
                                     />
                                 </label>
@@ -1020,17 +1052,19 @@ export function LlmProviderEditorScreen({
                                         <p className="text-[12px] font-semibold uppercase text-gray-400">
                                             Env keys
                                         </p>
-                                        {providerEnv.length > 0 ? (
-                                            <div className="mt-2 flex flex-wrap gap-2">
-                                                {providerEnv.map((envName) => (
-                                                    <span
-                                                        key={envName}
-                                                        className="inline-flex max-w-full break-all rounded-md bg-white px-3 py-1.5 font-mono text-[11px] leading-5 text-gray-700 ring-1 ring-inset ring-gray-200"
-                                                    >
-                                                        {envName}
-                                                    </span>
-                                                ))}
-                                            </div>
+                                        {runtimeEnvKeys.length > 0 ? (
+                                            <>
+                                                <div className="mt-2 flex flex-wrap gap-2">
+                                                    {runtimeEnvKeys.map((envKey) => (
+                                                        <RuntimeEnvKeyChip
+                                                            key={envKey.declared}
+                                                            envKey={envKey}
+                                                            className="inline-flex max-w-full break-all rounded-md bg-white px-3 py-1.5 font-mono text-[11px] leading-5 text-gray-700 ring-1 ring-inset ring-gray-200"
+                                                        />
+                                                    ))}
+                                                </div>
+                                                <RuntimeEnvKeyNote keys={runtimeEnvKeys} />
+                                            </>
                                         ) : (
                                             <p className="mt-2">
                                                 <span className="inline-flex max-w-full rounded-md bg-white px-3 py-1.5 font-mono text-[11px] leading-5 text-gray-700 ring-1 ring-inset ring-gray-200">
@@ -1104,7 +1138,7 @@ export function LlmProviderEditorScreen({
                         <p className="-mt-3 text-[13px] text-gray-500">
                             The OpenAI-compatible endpoint of the provider
                             (usually ends in{" "}
-                            <code className="rounded bg-gray-100 px-1 py-0.5">
+                            <code className="rounded-sm bg-gray-100 px-1 py-0.5">
                                 /v1
                             </code>
                             ).
@@ -1243,7 +1277,7 @@ export function LlmProviderEditorScreen({
                         <p className="text-[13px] text-gray-500">
                             Paste a models.dev provider, a single provider block,
                             or a full{" "}
-                            <code className="rounded bg-gray-100 px-1 py-0.5">
+                            <code className="rounded-sm bg-gray-100 px-1 py-0.5">
                                 opencode.jsonc
                             </code>
                             . Model maps are imported automatically.
@@ -1300,6 +1334,23 @@ export function LlmProviderEditorScreen({
                     </div>
 
                     {credentialFields}
+                    {runtimeEnvKeys.some((envKey) => envKey.tag !== null) ? (
+                        <p className="mt-6 text-[13px] leading-6 text-gray-500">
+                            On members&apos; machines and cloud workers this provider reads{" "}
+                            {runtimeEnvKeys.map((envKey, index) => (
+                                <span key={envKey.declared}>
+                                    {index > 0 ? ", " : null}
+                                    <RuntimeEnvKeyChip
+                                        envKey={envKey}
+                                        className="rounded-sm bg-gray-100 px-1.5 py-0.5 font-mono text-[12px]"
+                                    />
+                                </span>
+                            ))}
+                            {runtimeEnvKeys.some((envKey) => envKey.pending)
+                                ? ". The 5-character tag is assigned when the provider is created and stays fixed."
+                                : ", so it never collides with a key someone set themselves or with another provider of the same kind."}
+                        </p>
+                    ) : null}
                 </section>
             )}
 
@@ -1453,7 +1504,7 @@ export function LlmProviderEditorScreen({
                             setAccessTab("teams");
                             setAccessQuery("");
                         }}
-                        className={`inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 transition ${accessTab === "teams" ? "bg-white text-gray-900 shadow-sm" : "hover:text-gray-700"}`}
+                        className={`inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 transition ${accessTab === "teams" ? "bg-white text-gray-900 shadow-xs" : "hover:text-gray-700"}`}
                     >
                         <Users className="h-4 w-4" />
                         {`Teams (${selectedTeamIds.length})`}
@@ -1464,7 +1515,7 @@ export function LlmProviderEditorScreen({
                             setAccessTab("people");
                             setAccessQuery("");
                         }}
-                        className={`inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 transition ${accessTab === "people" ? "bg-white text-gray-900 shadow-sm" : "hover:text-gray-700"}`}
+                        className={`inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 transition ${accessTab === "people" ? "bg-white text-gray-900 shadow-xs" : "hover:text-gray-700"}`}
                     >
                         <User className="h-4 w-4" />
                         {`People (${selectedMemberIds.length})`}

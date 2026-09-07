@@ -9,6 +9,7 @@ import path from "node:path";
 import {
   desktopBootstrapPath as resolveDesktopBootstrapPath,
   legacyDesktopBootstrapPath as resolveLegacyDesktopBootstrapPath,
+  normalizeWorkspaceRootPath,
   openworkServerConfigPath as resolveOpenworkServerConfigPath,
 } from "@openwork/paths";
 
@@ -165,10 +166,14 @@ export function createWorkspaceStore({
   }
 
   function workspaceStatePath() {
+    const override = process.env.OPENWORK_DESKTOP_WORKSPACE_STATE_PATH?.trim();
+    if (override) return path.resolve(override);
     return path.join(app.getPath("userData"), "openwork-workspaces.json");
   }
 
   function openworkServerTokenStorePath() {
+    const override = process.env.OPENWORK_SERVER_TOKEN_STORE_PATH?.trim();
+    if (override) return path.resolve(override);
     return path.join(app.getPath("userData"), "openwork-server-tokens.json");
   }
 
@@ -525,25 +530,26 @@ export function createWorkspaceStore({
       : trimmed.startsWith("~/") || trimmed.startsWith("~\\")
         ? path.join(os.homedir(), trimmed.slice(2))
         : trimmed;
-    const resolved = path.resolve(expanded);
+    const normalized = normalizeWorkspaceRootPath(expanded, { platform: process.platform });
+    const resolved = path.resolve(normalized);
     return realpath(resolved).catch(() => resolved);
   }
 
   function normalizeWorkspacePathKey(value) {
-    const trimmed = String(value ?? "").trim();
-    return trimmed ? path.resolve(trimmed).replace(/\\/g, "/").toLowerCase() : "";
+    try {
+      const normalized = normalizeWorkspaceRootPath(value, { platform: process.platform });
+      return normalized ? path.resolve(normalized).replace(/\\/g, "/").toLowerCase() : "";
+    } catch {
+      return "";
+    }
   }
 
   function normalizeRecoveredWorkspacePath(value) {
-    const trimmed = String(value ?? "").trim();
-    if (!trimmed) return "";
-    if (process.platform !== "win32") return trimmed;
-    return trimmed
-      .replace(/^\\\\\?\\UNC\\/i, "\\\\")
-      .replace(/^\\\\\?\\/i, "")
-      .replace(/^\/\/\?\/UNC\//i, "//")
-      .replace(/^\/\/\?\//i, "")
-      .replace(/\//g, "\\");
+    try {
+      return normalizeWorkspaceRootPath(value, { platform: process.platform });
+    } catch {
+      return "";
+    }
   }
 
   function isRecord(value) {
@@ -922,6 +928,21 @@ export function createWorkspaceStore({
       .filter(Boolean);
   }
 
+  // Binary transfers must derive authority only from app-owned state in
+  // userData, never from workspace-writable configuration, so this list is
+  // intentionally not exposed to that surface (see listLocalWorkspacePaths).
+  async function listRemoteWorkspaceUrlPrefixes() {
+    const prefixes = new Set();
+    for (const workspace of (await readWorkspaceState()).workspaces) {
+      if (workspace?.workspaceType !== "remote") continue;
+      for (const value of [workspace.baseUrl, workspace.openworkHostUrl]) {
+        const raw = typeof value === "string" ? value.trim() : "";
+        if (raw) prefixes.add(raw);
+      }
+    }
+    return [...prefixes];
+  }
+
   function workspacePathKey(workspace) {
     return normalizeWorkspacePathKey(workspace.path);
   }
@@ -1213,6 +1234,7 @@ export function createWorkspaceStore({
     getDesktopBootstrapConfig,
     importConfig,
     listLocalWorkspacePaths,
+    listRemoteWorkspaceUrlPrefixes,
     migrateLegacyElectronWorkspaceStateIfNeeded,
     readDesktopBootstrapConfigSync,
     readWorkspaceOpenworkConfig,

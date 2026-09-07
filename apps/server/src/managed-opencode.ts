@@ -119,7 +119,7 @@ async function findFreePort(hostname: string, excludedPorts: number[] = []): Pro
   throw new Error("Failed to resolve free port outside the excluded set");
 }
 
-export async function createManagedOpencodeServer(options: {
+type ManagedOpencodeServerOptions = {
   bin?: string;
   cwd: string;
   hostname?: string;
@@ -127,15 +127,40 @@ export async function createManagedOpencodeServer(options: {
   excludedPorts?: number[];
   timeoutMs?: number;
   env?: Record<string, string | undefined>;
-}): Promise<ManagedOpencodeServer> {
-  const hostname = options.hostname ?? "127.0.0.1";
-  const port = options.port ?? await findFreePort(hostname, options.excludedPorts);
+};
+
+class ManagedOpencodeExitError extends Error {
+  readonly exitCode: number | null;
+
+  constructor(exitCode: number | null, output: string) {
+    super(`OpenCode server exited with code ${exitCode}${output.trim() ? `\n${output}` : ""}`);
+    this.exitCode = exitCode;
+  }
+}
+
+function isRetryableAddressInUseExit(error: unknown): boolean {
+  return error instanceof ManagedOpencodeExitError &&
+    error.exitCode === 1 &&
+    /\bEADDRINUSE\b/.test(error.message);
+}
+
+async function startManagedOpencodeServer(
+  options: ManagedOpencodeServerOptions,
+  hostname: string,
+  port: number,
+): Promise<ManagedOpencodeServer> {
   const username = randomSecret();
   const password = randomSecret();
   const args = ["serve", "--hostname", hostname, "--port", String(port), "--cors", "*"];
   const command = options.bin?.trim() || "opencode";
+  // The engine's in-process npm installs use Arborist, which audits by default.
+  // That audit POST depends on npm's advisories endpoint, which has been observed
+  // to hang for the full five-minute registry timeout, so first-run must not wait.
+  // @npmcli/config reads npm_config_* settings from the environment.
+  const engineEnvDefaults = { npm_config_audit: "false" };
   const env: NodeJS.ProcessEnv = {
     ...process.env,
+    ...engineEnvDefaults,
     ...options.env,
     OPENCODE_SERVER_USERNAME: username,
     OPENCODE_SERVER_PASSWORD: password,
@@ -144,6 +169,7 @@ export async function createManagedOpencodeServer(options: {
   // that decrypts OpenWork-owned OAuth credentials.
   delete env.OPENWORK_ENCRYPTION_KEY;
   const injectedEnv = Object.entries({
+    ...engineEnvDefaults,
     ...(options.env ?? {}),
     OPENCODE_SERVER_USERNAME: username,
     OPENCODE_SERVER_PASSWORD: password,
@@ -189,7 +215,9 @@ export async function createManagedOpencodeServer(options: {
         output += chunk.toString();
       });
       child.once("error", fail);
-      child.once("exit", (code) => fail(new Error(`OpenCode server exited with code ${code}${output.trim() ? `\n${output}` : ""}`)));
+      // ChildProcess can emit "exit" before its stdio pipes have drained. Wait
+      // for "close" so retry classification includes every diagnostic line.
+      child.once("close", (code) => fail(new ManagedOpencodeExitError(code, output)));
     });
   } catch (error) {
     await processLifecycle.close();
@@ -210,4 +238,19 @@ export async function createManagedOpencodeServer(options: {
     isAlive: processLifecycle.isAlive,
     close: processLifecycle.close,
   };
+}
+
+export async function createManagedOpencodeServer(options: ManagedOpencodeServerOptions): Promise<ManagedOpencodeServer> {
+  const hostname = options.hostname ?? "127.0.0.1";
+  const port = options.port ?? await findFreePort(hostname, options.excludedPorts);
+  try {
+    return await startManagedOpencodeServer(options, hostname, port);
+  } catch (error) {
+    // The automatic free-port probe is necessarily racy. Retry exactly once on
+    // the one startup failure that a new port can safely fix; explicit ports
+    // and all other code-1 exits remain actionable.
+    if (options.port !== undefined || !isRetryableAddressInUseExit(error)) throw error;
+    const retryPort = await findFreePort(hostname, [...(options.excludedPorts ?? []), port]);
+    return startManagedOpencodeServer(options, hostname, retryPort);
+  }
 }

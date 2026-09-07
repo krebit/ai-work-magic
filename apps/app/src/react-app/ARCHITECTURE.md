@@ -174,11 +174,11 @@ Rules when adding a sidebar row:
 3. Style section labels with `SIDEBAR_SECTION_LABEL`; put them on the glyph lane
    only when they are top-level.
 
-`evals/flows/sidebar-lanes.flow.mjs` asserts every rendered row lands on one of
-the two rails, so a new row with its own padding fails the flow.
+`evals/specs/**/*.test.ts` is the executable coverage home for these rails; add
+an observable assertion there whenever a row changes.
 
 ## Testing
 
 - Unit: `bun test tests/` (CI-gated). Pure logic and parsers belong here.
 - Smoke/e2e: `pnpm test:e2e` and `scripts/*.mjs` (health, sessions, events).
-- UI evals: `pnpm evals` from the repo root drives the real app.
+- UI E2E tests: `pnpm evals:e2e` from the repo root drives the real app.

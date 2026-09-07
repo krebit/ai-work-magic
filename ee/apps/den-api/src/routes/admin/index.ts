@@ -9,6 +9,11 @@ import {
   DesktopHandoffGrantTable,
   ExternalIdentityTable,
   InvitationTable,
+  InferenceOrgLimitPolicyTable,
+  InferenceOrgUsageBucketTable,
+  InferenceUsageLedgerBucketChargeTable,
+  InferenceUsageLedgerEntryTable,
+  LlmProviderMemberCredentialTable,
   MemberTable,
   OAuthAccessTokenTable,
   OAuthClientTable,
@@ -20,8 +25,9 @@ import {
   TelemetryEventTable,
   WorkerTable,
   AdminAllowlistTable,
+  AuditEventTable,
 } from "@openwork-ee/den-db/schema"
-import { isDenTypeId } from "@openwork-ee/utils/typeid"
+import { createDenTypeId, isDenTypeId } from "@openwork-ee/utils/typeid"
 import type { Hono } from "hono"
 import { describeRoute } from "hono-openapi"
 import { z } from "zod"
@@ -31,15 +37,16 @@ import { parseOrganizationPlan, type PlanTier } from "../../entitlements.js"
 import { adminRoute, queryValidator } from "../../middleware/index.js"
 import { denTypeIdSchema, forbiddenSchema, invalidRequestSchema, jsonResponse, unauthorizedSchema } from "../../openapi.js"
 import { appLogger } from "../../observability/logger.js"
-import { organizationCloudEnabled } from "../../capability-sources/cloud-rollout.js"
-import { codemodeScriptsEnabled } from "../../capability-sources/codemode-rollout.js"
 import { memberFacingMcpConnectionsEnabled } from "../../capability-sources/external-mcp-rollout.js"
 import { organizationInstallLinksEnabled } from "../../capability-sources/install-links-rollout.js"
 import { normalizeOrganizationCapabilities, readOrganizationCapabilityOverrides } from "../../organization-capabilities.js"
 import { DEFAULT_ORGANIZATION_LIMITS, normalizeOrganizationMetadata } from "../../organization-limits.js"
 import { env } from "../../env.js"
 import type { AuthContextVariables } from "../../session.js"
-import { calculateOrganizationSeatBillingCounts, getOrganizationSeatBillingCounts, refreshOrgSubscriptionFromStripe, syncSeatSubscriptionQuantityAfterMemberChange } from "../../stripe-billing.js"
+import { buildOrganizationAuditEvent, logOrganizationAuditEvent, ORGANIZATION_AUDIT_ACTIONS } from "../../audit-events.js"
+import { hasOpenWorkWebComplimentaryAccess, resolveOpenWorkWebAccess, setOpenWorkWebComplimentaryAccess } from "../../openwork-web-access.js"
+import { isOpenWorkWebAvailable } from "../../openwork-web-availability.js"
+import { calculateOrganizationSeatBillingCounts, getOrganizationSeatBillingCounts, isEligibleOpenWorkWebSubscriptionStatus, isOngoingOpenWorkWebSubscriptionStatus, organizationHasOngoingOpenWorkWebSubscription, refreshOrgSubscriptionFromStripe, syncSeatSubscriptionQuantityAfterMemberChange } from "../../stripe-billing.js"
 import { buildAdminPageInfo, normalizeAdminPageRequest, sanitizeAdminSearchForLike, type AdminPageRequest } from "./scale-performance.js"
 
 type UserId = typeof AuthUserTable.$inferSelect.id
@@ -81,13 +88,22 @@ const updateOrganizationFreeSeatsSchema = z.object({
   totalFreeSeats: z.number().int().min(DEFAULT_ORGANIZATION_FREE_SEAT_COUNT).max(100000),
 })
 
+const updateOrganizationOpenWorkWebAccessSchema = z.object({
+  enabled: z.boolean(),
+  reason: z.string().trim().min(3).max(500),
+})
+
 const updateOrganizationCapabilitiesSchema = z.object({
   capabilities: z.object({
     installLinks: z.boolean().nullable().optional(),
     mcpConnections: z.boolean().nullable().optional(),
-    codemodeScripts: z.boolean().nullable().optional(),
-    cloud: z.boolean().nullable().optional(),
+    modelsAnalytics: z.boolean().nullable().optional(),
   }),
+})
+
+const createAdminSchema = z.object({
+  email: z.string().trim().max(255).email().transform((email) => email.toLowerCase()),
+  note: z.string().max(255).nullable().optional(),
 })
 
 const adminActivityPointSchema = z.object({
@@ -270,8 +286,32 @@ function readAdminVisibleOrganizationCapabilities(metadata: Record<string, unkno
   return {
     installLinks: organizationInstallLinksEnabled(metadata, { gatingEnabled: false }),
     mcpConnections: memberFacingMcpConnectionsEnabled(metadata, { gatingEnabled: false }),
-    codemodeScripts: codemodeScriptsEnabled(metadata),
-    cloud: organizationCloudEnabled(metadata, { orgMode: env.orgMode }),
+    modelsAnalytics: normalizeOrganizationCapabilities(metadata).modelsAnalytics,
+  }
+}
+
+function readAdminOpenWorkWebAccess(
+  metadata: Record<string, unknown> | string | null | undefined,
+  subscription: AdminOpenWorkWebSubscription | null,
+) {
+  const complimentaryAccess = hasOpenWorkWebComplimentaryAccess(metadata)
+  const hasEligibleSubscription = Boolean(
+    subscription
+    && isEligibleOpenWorkWebSubscriptionStatus(subscription.status)
+    && env.stripe.openworkWebPriceId
+    && subscription.stripe_price_id === env.stripe.openworkWebPriceId
+    && subscription.payment_failed !== true,
+  )
+  const access = resolveOpenWorkWebAccess({
+    deploymentAvailable: isOpenWorkWebAvailable(),
+    hasEligibleSubscription,
+    complimentaryAccess,
+  })
+  return {
+    ...access,
+    hasEligibleSubscription,
+    hasOngoingSubscription: Boolean(subscription && isOngoingOpenWorkWebSubscriptionStatus(subscription.status)),
+    subscriptionStatus: subscription?.status ?? null,
   }
 }
 
@@ -280,7 +320,12 @@ function readUnmanagedCapabilityMetadata(metadata: Record<string, unknown>): Rec
   const capabilities: Record<string, unknown> = {}
 
   for (const [key, value] of Object.entries(raw)) {
-    if (key !== "installLinks" && key !== "mcpConnections" && key !== "codemodeScripts" && key !== "cloud") {
+    // "workflows", "codemodeScripts", "remoteMcpApps", and "cloud" are retired
+    // rollout keys: those features are now always on (Cloud is entitled by
+    // OpenWork Web access instead), so stale stored overrides stay managed
+    // (dropped on the next capabilities write) instead of passing through as
+    // unmanaged metadata.
+    if (key !== "modelsAnalytics" && key !== "installLinks" && key !== "mcpConnections" && key !== "workflows" && key !== "codemodeScripts" && key !== "remoteMcpApps" && key !== "cloud") {
       capabilities[key] = value
     }
   }
@@ -302,6 +347,22 @@ function isOrganizationId(value: string): value is OrganizationId {
 
 function isUserId(value: string): value is UserId {
   return isDenTypeId("user", value)
+}
+
+function isDuplicateDatabaseEntry(error: unknown): boolean {
+  let current = error
+  const visited = new Set<object>()
+  while (typeof current === "object" && current !== null && !visited.has(current)) {
+    visited.add(current)
+    if ("code" in current && current.code === "ER_DUP_ENTRY") {
+      return true
+    }
+    if ("errno" in current && current.errno === 1062) {
+      return true
+    }
+    current = "cause" in current ? current.cause : null
+  }
+  return false
 }
 
 async function mapWithConcurrency<T, R>(items: T[], limit: number, mapper: (item: T) => Promise<R>): Promise<R[]> {
@@ -388,7 +449,15 @@ type AdminOrganizationRow = {
   seatsFreeAdditional: number
   billableSeatCount: number
   capabilities: ReturnType<typeof normalizeOrganizationCapabilities>
+  openworkWebAccess: AdminOpenWorkWebAccess
 }
+
+type AdminOpenWorkWebSubscription = Pick<
+  typeof OrgSubscriptionTable.$inferSelect,
+  "status" | "stripe_price_id" | "payment_failed"
+>
+
+type AdminOpenWorkWebAccess = ReturnType<typeof readAdminOpenWorkWebAccess>
 
 type AdminSummary = {
   totalUsers: number
@@ -857,15 +926,30 @@ async function shapeAdminOrganizationRows(rows: Array<Pick<typeof OrganizationTa
   }
 
   const organizationIds = rows.map((row) => row.id)
-  const memberRows = await db
-    .select({ organizationId: MemberTable.organizationId, memberCount: sql<number>`count(*)` })
-    .from(MemberTable)
-    .where(and(inArray(MemberTable.organizationId, organizationIds), isNull(MemberTable.removedAt)))
-    .groupBy(MemberTable.organizationId)
+  const [memberRows, webSubscriptionRows] = await Promise.all([
+    db
+      .select({ organizationId: MemberTable.organizationId, memberCount: sql<number>`count(*)` })
+      .from(MemberTable)
+      .where(and(inArray(MemberTable.organizationId, organizationIds), isNull(MemberTable.removedAt)))
+      .groupBy(MemberTable.organizationId),
+    db
+      .select({
+        organizationId: OrgSubscriptionTable.organization_id,
+        status: OrgSubscriptionTable.status,
+        stripe_price_id: OrgSubscriptionTable.stripe_price_id,
+        payment_failed: OrgSubscriptionTable.payment_failed,
+      })
+      .from(OrgSubscriptionTable)
+      .where(and(
+        inArray(OrgSubscriptionTable.organization_id, organizationIds),
+        eq(OrgSubscriptionTable.type, "web"),
+      )),
+  ])
   const memberCountByOrg = new Map<string, number>()
   for (const row of memberRows) {
     memberCountByOrg.set(row.organizationId, toNumber(row.memberCount))
   }
+  const webSubscriptionByOrg = new Map(webSubscriptionRows.map((row) => [row.organizationId, row]))
 
   return rows.map((entry) => {
     const metadata = normalizeOrganizationMetadata(entry.metadata).metadata
@@ -884,6 +968,7 @@ async function shapeAdminOrganizationRows(rows: Array<Pick<typeof OrganizationTa
       seatsFreeAdditional: seatCounts.additionalFree,
       billableSeatCount: seatCounts.chargeable,
       capabilities: readAdminVisibleOrganizationCapabilities(metadata),
+      openworkWebAccess: readAdminOpenWorkWebAccess(metadata, webSubscriptionByOrg.get(entry.id) ?? null),
     }
   })
 }
@@ -1139,6 +1224,7 @@ export async function loadAdminInitialOverviewPayload(user: AdminOverviewViewer,
   const [admins, userPage, organizationTotal] = await Promise.all([
     db
       .select({
+        id: AdminAllowlistTable.id,
         email: AdminAllowlistTable.email,
         note: AdminAllowlistTable.note,
         createdAt: AdminAllowlistTable.created_at,
@@ -1168,6 +1254,235 @@ export async function loadAdminInitialOverviewPayload(user: AdminOverviewViewer,
 
 
 export function registerAdminRoutes<T extends { Variables: AuthContextVariables }>(app: Hono<T>) {
+  app.post(
+    "/v1/admin/admins",
+    adminRoute(),
+    async (c) => {
+      const body = createAdminSchema.safeParse(await c.req.json().catch(() => null))
+      if (!body.success) {
+        return c.json({ error: "invalid_request", message: body.error.issues[0]?.message ?? "Invalid admin request." }, 400)
+      }
+
+      const id = createDenTypeId("adminAllowlist")
+      const createdAt = new Date()
+      try {
+        await db.insert(AdminAllowlistTable).values({
+          id,
+          email: body.data.email,
+          note: body.data.note ?? null,
+          created_at: createdAt,
+        })
+      } catch (error) {
+        if (isDuplicateDatabaseEntry(error)) {
+          return c.json({ error: "conflict", message: `An admin with email ${body.data.email} already exists.` }, 409)
+        }
+        throw error
+      }
+
+      return c.json({
+        ok: true,
+        admin: { id, email: body.data.email, note: body.data.note ?? null, createdAt },
+      })
+    },
+  )
+
+  app.delete(
+    "/v1/admin/admins/:adminId",
+    adminRoute(),
+    async (c) => {
+      const adminId = c.req.param("adminId")
+      if (!isDenTypeId("adminAllowlist", adminId)) {
+        return c.json({ error: "invalid_request", message: "Invalid admin id." }, 400)
+      }
+
+      const viewerEmail = normalizeEmail(c.get("user").email)
+      const result = await db.transaction(async (tx) => {
+        const admins = await tx
+          .select({ id: AdminAllowlistTable.id, email: AdminAllowlistTable.email })
+          .from(AdminAllowlistTable)
+          .for("update")
+        const target = admins.find((admin) => admin.id === adminId)
+        if (!target) {
+          return "not_found"
+        }
+        if (normalizeEmail(target.email) === viewerEmail) {
+          return "current_viewer"
+        }
+        if (admins.length === 1) {
+          return "final_admin"
+        }
+        await tx.delete(AdminAllowlistTable).where(eq(AdminAllowlistTable.id, adminId))
+        return "deleted"
+      })
+
+      if (result === "not_found") {
+        return c.json({ error: "not_found", message: "Admin not found." }, 404)
+      }
+      if (result === "current_viewer") {
+        return c.json({ error: "invalid_request", message: "You cannot delete your own admin access." }, 400)
+      }
+      if (result === "final_admin") {
+        return c.json({ error: "invalid_request", message: "You cannot delete the final admin." }, 400)
+      }
+      return c.json({ ok: true })
+    },
+  )
+
+  app.get(
+    "/v1/admin/users/:userId/inference-usage",
+    adminRoute(),
+    async (c) => {
+      const userId = c.req.param("userId")
+      if (!isUserId(userId)) {
+        return c.json({ error: "invalid_request", message: "Invalid user id." }, 400)
+      }
+
+      const users = await db
+        .select({ id: AuthUserTable.id, email: AuthUserTable.email })
+        .from(AuthUserTable)
+        .where(eq(AuthUserTable.id, userId))
+        .limit(1)
+      const user = users[0]
+      if (!user) {
+        return c.json({ error: "not_found", message: "User not found." }, 404)
+      }
+
+      const rows = await db
+        .select({
+          organizationId: OrganizationTable.id,
+          organizationName: OrganizationTable.name,
+          membershipId: MemberTable.id,
+          bucketId: InferenceOrgUsageBucketTable.id,
+          windowType: InferenceOrgLimitPolicyTable.window_type,
+          windowStartAt: InferenceOrgUsageBucketTable.window_start_at,
+          windowEndAt: InferenceOrgUsageBucketTable.window_end_at,
+          limitAmount: InferenceOrgUsageBucketTable.limit_amount,
+          organizationUsedAmount: InferenceOrgUsageBucketTable.used_amount,
+          userUsedAmount: sql<number>`coalesce(sum(${InferenceUsageLedgerBucketChargeTable.amount}), 0)`,
+        })
+        .from(MemberTable)
+        .innerJoin(OrganizationTable, eq(MemberTable.organizationId, OrganizationTable.id))
+        .innerJoin(InferenceOrgLimitPolicyTable, eq(MemberTable.organizationId, InferenceOrgLimitPolicyTable.organization_id))
+        .innerJoin(InferenceOrgUsageBucketTable, eq(InferenceOrgLimitPolicyTable.current_bucket_id, InferenceOrgUsageBucketTable.id))
+        .leftJoin(InferenceUsageLedgerEntryTable, and(
+          eq(InferenceUsageLedgerEntryTable.org_membership_id, MemberTable.id),
+          eq(InferenceUsageLedgerEntryTable.organization_id, MemberTable.organizationId),
+        ))
+        .leftJoin(InferenceUsageLedgerBucketChargeTable, and(
+          eq(InferenceUsageLedgerBucketChargeTable.ledger_entry_id, InferenceUsageLedgerEntryTable.id),
+          eq(InferenceUsageLedgerBucketChargeTable.bucket_id, InferenceOrgUsageBucketTable.id),
+        ))
+        .where(and(eq(MemberTable.userId, userId), isNull(MemberTable.removedAt)))
+        .groupBy(
+          OrganizationTable.id,
+          OrganizationTable.name,
+          MemberTable.id,
+          InferenceOrgUsageBucketTable.id,
+          InferenceOrgLimitPolicyTable.window_type,
+          InferenceOrgUsageBucketTable.window_start_at,
+          InferenceOrgUsageBucketTable.window_end_at,
+          InferenceOrgUsageBucketTable.limit_amount,
+          InferenceOrgUsageBucketTable.used_amount,
+        )
+        .orderBy(asc(OrganizationTable.name), asc(InferenceOrgLimitPolicyTable.window_type))
+
+      const organizations = new Map<typeof MemberTable.$inferSelect.id, {
+        id: OrganizationId
+        name: string
+        membershipId: typeof MemberTable.$inferSelect.id
+        windows: Array<{
+          bucketId: typeof InferenceOrgUsageBucketTable.$inferSelect.id
+          windowType: typeof InferenceOrgLimitPolicyTable.$inferSelect.window_type
+          windowStartAt: Date
+          windowEndAt: Date
+          limitAmount: number
+          organizationUsedAmount: number
+          userUsedAmount: number
+        }>
+      }>()
+      for (const row of rows) {
+        const organization = organizations.get(row.membershipId) ?? {
+          id: row.organizationId,
+          name: row.organizationName,
+          membershipId: row.membershipId,
+          windows: [],
+        }
+        organization.windows.push({
+          bucketId: row.bucketId,
+          windowType: row.windowType,
+          windowStartAt: row.windowStartAt,
+          windowEndAt: row.windowEndAt,
+          limitAmount: toNumber(row.limitAmount),
+          organizationUsedAmount: toNumber(row.organizationUsedAmount),
+          userUsedAmount: toNumber(row.userUsedAmount),
+        })
+        organizations.set(row.membershipId, organization)
+      }
+
+      return c.json({ user, organizations: Array.from(organizations.values()) })
+    },
+  )
+
+  app.post(
+    "/v1/admin/users/:userId/inference-usage/reset",
+    adminRoute(),
+    async (c) => {
+      const userId = c.req.param("userId")
+      if (!isUserId(userId)) {
+        return c.json({ error: "invalid_request", message: "Invalid user id." }, 400)
+      }
+
+      const users = await db.select({ id: AuthUserTable.id }).from(AuthUserTable).where(eq(AuthUserTable.id, userId)).limit(1)
+      if (!users[0]) {
+        return c.json({ error: "not_found", message: "User not found." }, 404)
+      }
+
+      const resetAmount = await db.transaction(async (tx) => {
+        const charges = await tx
+          .select({
+            id: InferenceUsageLedgerBucketChargeTable.id,
+            bucketId: InferenceUsageLedgerBucketChargeTable.bucket_id,
+            amount: InferenceUsageLedgerBucketChargeTable.amount,
+          })
+          .from(InferenceUsageLedgerBucketChargeTable)
+          .innerJoin(InferenceUsageLedgerEntryTable, eq(InferenceUsageLedgerBucketChargeTable.ledger_entry_id, InferenceUsageLedgerEntryTable.id))
+          .innerJoin(MemberTable, and(
+            eq(InferenceUsageLedgerEntryTable.org_membership_id, MemberTable.id),
+            eq(InferenceUsageLedgerEntryTable.organization_id, MemberTable.organizationId),
+          ))
+          .innerJoin(InferenceOrgLimitPolicyTable, and(
+            eq(InferenceUsageLedgerEntryTable.organization_id, InferenceOrgLimitPolicyTable.organization_id),
+            eq(InferenceUsageLedgerBucketChargeTable.bucket_id, InferenceOrgLimitPolicyTable.current_bucket_id),
+          ))
+          .where(and(eq(MemberTable.userId, userId), isNull(MemberTable.removedAt)))
+          .for("update")
+
+        const amountByBucket = new Map<typeof InferenceOrgUsageBucketTable.$inferSelect.id, number>()
+        let total = 0
+        for (const charge of charges) {
+          const amount = toNumber(charge.amount)
+          amountByBucket.set(charge.bucketId, (amountByBucket.get(charge.bucketId) ?? 0) + amount)
+          total += amount
+        }
+        for (const [bucketId, amount] of amountByBucket) {
+          await tx
+            .update(InferenceOrgUsageBucketTable)
+            .set({ used_amount: sql`greatest(${InferenceOrgUsageBucketTable.used_amount} - ${amount}, 0)` })
+            .where(eq(InferenceOrgUsageBucketTable.id, bucketId))
+        }
+        if (charges.length > 0) {
+          await tx.delete(InferenceUsageLedgerBucketChargeTable).where(inArray(
+            InferenceUsageLedgerBucketChargeTable.id,
+            charges.map((charge) => charge.id),
+          ))
+        }
+        return total
+      })
+
+      return c.json({ ok: true, resetAmount })
+    },
+  )
+
   app.delete(
     "/v1/admin/users/:userId",
     adminRoute(),
@@ -1199,12 +1514,20 @@ export function registerAdminRoutes<T extends { Variables: AuthContextVariables 
         .where(eq(MemberTable.userId, userId))
       const activeMembershipRows = membershipRows.filter((member) => !member.removedAt)
       const sessionRows = await db
-        .select({ token: AuthSessionTable.token })
+        .select({ id: AuthSessionTable.id, token: AuthSessionTable.token })
         .from(AuthSessionTable)
         .where(eq(AuthSessionTable.userId, userId))
-
-      await db.transaction(async (tx) => {
+      // Grant tombstones must cover exactly the deleted consent set. Snapshot
+      // the ids inside the transaction with a locking read so a concurrently
+      // authorized consent cannot slip between the snapshot and the delete
+      // (Warden RUD-WDK).
+      const oauthConsentRows = await db.transaction(async (tx) => {
         const removedAt = new Date()
+        const consentRows = await tx
+          .select({ id: OAuthConsentTable.id })
+          .from(OAuthConsentTable)
+          .where(eq(OAuthConsentTable.userId, userId))
+          .for("update")
 
         await tx.delete(OAuthAccessTokenTable).where(eq(OAuthAccessTokenTable.userId, userId))
         await tx.delete(OAuthRefreshTokenTable).where(eq(OAuthRefreshTokenTable.userId, userId))
@@ -1221,14 +1544,26 @@ export function registerAdminRoutes<T extends { Variables: AuthContextVariables 
             ConnectedAccountTable.orgMembershipId,
             membershipRows.map((member) => member.id),
           ))
+          await tx.delete(LlmProviderMemberCredentialTable).where(inArray(
+            LlmProviderMemberCredentialTable.orgMembershipId,
+            membershipRows.map((member) => member.id),
+          ))
         }
         await tx.update(MemberTable).set({ removedAt }).where(eq(MemberTable.userId, userId))
         await tx.update(WorkerTable).set({ created_by_user_id: null }).where(eq(WorkerTable.created_by_user_id, userId))
         await tx.delete(AuthUserTable).where(eq(AuthUserTable.id, userId))
+        return consentRows
       })
-      await Promise.all(sessionRows.map((session) => cache.auth.deleteSession(session.token)))
+      // Auth session cache hits intentionally avoid a DB liveness check; user deletion must clear
+      // both token and session-id cache entries for every deleted session instead.
+      await Promise.all(sessionRows.flatMap((session) => [
+        cache.auth.revokeSession(session.token),
+        cache.auth.revokeSessionId(session.id),
+      ]))
+      await Promise.all(oauthConsentRows.map((consent) => cache.auth.revokeGrant(consent.id)))
 
       const organizationIds = Array.from(new Set(activeMembershipRows.map((row) => row.organizationId).filter(isOrganizationId)))
+      // Admin user deletion soft-removes memberships; clear affected org membership caches.
       await Promise.all(organizationIds.map((organizationId) => cache.org.deleteMembers(organizationId)))
       for (const organizationId of organizationIds) {
         const seatCounts = await getOrganizationSeatBillingCounts({ organizationId })
@@ -1334,6 +1669,102 @@ export function registerAdminRoutes<T extends { Variables: AuthContextVariables 
     },
   )
 
+  app.put(
+    "/v1/admin/organizations/:organizationId/openwork-web-access",
+    adminRoute(),
+    async (c) => {
+      const body = updateOrganizationOpenWorkWebAccessSchema.safeParse(await c.req.json().catch(() => null))
+      if (!body.success) {
+        return c.json({ error: "invalid_request", message: body.error.issues[0]?.message ?? "Invalid OpenWork Web access request." }, 400)
+      }
+
+      const organizationId = c.req.param("organizationId")
+      if (!isOrganizationId(organizationId)) {
+        return c.json({ error: "invalid_request", message: "Invalid organization id." }, 400)
+      }
+
+      if (body.data.enabled && await organizationHasOngoingOpenWorkWebSubscription(organizationId)) {
+        return c.json({
+          error: "openwork_web_subscription_exists",
+          message: "Cancel or finish the existing paid OpenWork Web subscription before granting complimentary access.",
+        }, 409)
+      }
+
+      const actorUserId = c.get("user").id
+      const result = await db.transaction(async (tx) => {
+        const organizations = await tx
+          .select({ id: OrganizationTable.id, metadata: OrganizationTable.metadata })
+          .from(OrganizationTable)
+          .where(eq(OrganizationTable.id, organizationId))
+          .limit(1)
+          .for("update")
+        const organization = organizations[0]
+        if (!organization) {
+          return "not_found"
+        }
+
+        const webSubscriptions = await tx
+          .select({
+            status: OrgSubscriptionTable.status,
+            stripe_price_id: OrgSubscriptionTable.stripe_price_id,
+            payment_failed: OrgSubscriptionTable.payment_failed,
+          })
+          .from(OrgSubscriptionTable)
+          .where(and(
+            eq(OrgSubscriptionTable.organization_id, organizationId),
+            eq(OrgSubscriptionTable.type, "web"),
+          ))
+          .limit(1)
+          .for("update")
+        const webSubscription = webSubscriptions[0] ?? null
+        if (body.data.enabled && webSubscription && isOngoingOpenWorkWebSubscriptionStatus(webSubscription.status)) {
+          return "subscription_exists"
+        }
+
+        const normalizedMetadata = normalizeOrganizationMetadata(organization.metadata).metadata
+        const metadata = setOpenWorkWebComplimentaryAccess(normalizedMetadata, body.data.enabled)
+        const auditEvent = buildOrganizationAuditEvent({
+          organizationId,
+          actorUserId,
+          action: body.data.enabled
+            ? ORGANIZATION_AUDIT_ACTIONS.openWorkWebComplimentaryAccessGranted
+            : ORGANIZATION_AUDIT_ACTIONS.openWorkWebComplimentaryAccessRevoked,
+          payload: {
+            reason: body.data.reason,
+            complimentaryAccess: body.data.enabled,
+          },
+        })
+
+        await tx
+          .update(OrganizationTable)
+          .set({ metadata })
+          .where(eq(OrganizationTable.id, organizationId))
+        await tx.insert(AuditEventTable).values(auditEvent)
+
+        return { metadata, webSubscription, auditEvent }
+      })
+
+      if (result === "not_found") {
+        return c.json({ error: "not_found", message: "Organization not found." }, 404)
+      }
+      if (result === "subscription_exists") {
+        return c.json({
+          error: "openwork_web_subscription_exists",
+          message: "Cancel or finish the existing paid OpenWork Web subscription before granting complimentary access.",
+        }, 409)
+      }
+
+      logOrganizationAuditEvent(result.auditEvent)
+      return c.json({
+        ok: true,
+        organization: {
+          id: organizationId,
+          openworkWebAccess: readAdminOpenWorkWebAccess(result.metadata, result.webSubscription),
+        },
+      })
+    },
+  )
+
   app.get(
     "/v1/admin/organizations/:organizationId/capabilities",
     adminRoute(),
@@ -1400,22 +1831,10 @@ export function registerAdminRoutes<T extends { Variables: AuthContextVariables 
           capabilities.mcpConnections = mcpConnections
         }
       }
-      const codemodeScripts = body.data.capabilities.codemodeScripts
-      if (codemodeScripts !== undefined) {
-        if (codemodeScripts === null) {
-          delete capabilities.codemodeScripts
-        } else {
-          capabilities.codemodeScripts = codemodeScripts
-        }
-      }
-      const cloud = body.data.capabilities.cloud
-      if (cloud !== undefined) {
-        if (cloud === null) {
-          delete capabilities.cloud
-        } else {
-          capabilities.cloud = cloud
-        }
-      }
+
+      const modelsAnalytics = body.data.capabilities.modelsAnalytics
+      if (modelsAnalytics === null) delete capabilities.modelsAnalytics
+      else if (modelsAnalytics !== undefined) capabilities.modelsAnalytics = modelsAnalytics
 
       const normalizedMetadata = normalizeOrganizationMetadata(organization.metadata).metadata
       const metadata = {

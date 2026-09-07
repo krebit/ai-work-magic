@@ -42,7 +42,11 @@ export async function signInDesktopAs(app: Surface, den: DenRef, member: DenSess
     label: "auth.exchange-grant action registered",
   });
   const grant = await createDesktopHandoffGrant(member);
-  await control(app, "auth.exchange-grant", { grant, baseUrl: den.webUrl });
+  try {
+    await control(app, "auth.exchange-grant", { grant, baseUrl: den.webUrl });
+  } catch (error) {
+    if (!messageText(error).includes("Already acting: auth.exchange-grant")) throw error;
+  }
   await waitForDenState(app, den, "Boolean((localStorage.getItem('openwork.den.authToken') ?? '').trim())", {
     timeoutMs: 45_000,
     label: "persisted den auth token",
@@ -112,7 +116,7 @@ async function resolveWorkspaceId(app: Surface): Promise<string> {
  */
 export async function createAndSelectWorkspace(
   app: Surface,
-  input: { path: string },
+  input: { path: string; create?: boolean },
 ): Promise<SelectedWorkspaceFacts> {
   let workspaceId = "";
   const route = await currentHash(app);
@@ -135,7 +139,7 @@ export async function createAndSelectWorkspace(
   } else {
     if (route.includes("/onboarding")) await completeOrganizationOnboarding(app);
     workspaceId = await resolveWorkspaceId(app);
-    if (!workspaceId) {
+    if (!workspaceId || input.create) {
       await waitFor(app, `window.__openworkControl.listActions()
         .some((action) => action.id === "workspace.create" && !action.disabled)`, {
         timeoutMs: 60_000,
@@ -143,11 +147,14 @@ export async function createAndSelectWorkspace(
       });
       // Cold first action: engine spawn + Vite compile can exceed the default
       // evaluate bound, and this proved flaky at 8s (passed on rerun).
-      await control(app, "workspace.create", input, { timeoutMs: 60_000 });
+      await control(app, "workspace.create", { path: input.path }, { timeoutMs: 60_000 });
       // The app does not always put a new workspace in the hash, so wait for its
       // own active-workspace state to settle instead of matching a route shape.
-      await waitFor(app, `Boolean(localStorage.getItem("openwork.react.activeWorkspace"))
-        || /\\/workspace\\/[^/?#]+/.test(window.location.hash)`, {
+      await waitFor(app, `(() => {
+        const selected = localStorage.getItem("openwork.react.activeWorkspace")
+          || window.location.hash.match(/\\/workspace\\/([^/?#]+)/)?.[1];
+        return Boolean(selected) && selected !== ${JSON.stringify(workspaceId)};
+      })()`, {
         timeoutMs: 120_000,
         label: "created workspace selected",
       });

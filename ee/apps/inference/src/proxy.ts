@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto"
+import { inferenceBearerKey } from "@openwork-ee/utils/inference-bearer-key"
 import type { Context, Hono } from "hono"
 import { env } from "./env.js"
 import type { findActiveInferenceKey as findActiveInferenceKeyFn, getOpenRouterProviderKey as getOpenRouterProviderKeyFn } from "./keys.js"
@@ -11,6 +12,7 @@ import {
 } from "./inference-reporting.js"
 import type { InferenceReporter } from "./inference-reporting.js"
 import { listModelCatalog, resolveModelAlias } from "./model-catalog.js"
+import type { AnalyticsObserver, beginModelAnalytics } from "./task-analytics.js"
 
 type JsonObject = Record<string, unknown>
 type PreparedBody = {
@@ -38,9 +40,9 @@ const blockedServerToolTypes = new Set([
 ])
 
 const defaultProxyDependencies: ProxyDependencies = {
-  async findActiveInferenceKey(rawKey) {
+  async findActiveInferenceKey(key) {
     const keys = await import("./keys.js")
-    return keys.findActiveInferenceKey(rawKey)
+    return keys.findActiveInferenceKey(key)
   },
   async getOpenRouterProviderKey(organizationId) {
     const keys = await import("./keys.js")
@@ -51,6 +53,10 @@ const defaultProxyDependencies: ProxyDependencies = {
     return limits.ensureUsableBuckets(organizationId)
   },
   fetch,
+  async analytics(input) {
+    const { beginModelAnalytics } = await import("./task-analytics.js")
+    return beginModelAnalytics(input)
+  },
 }
 
 type ProxyDependencies = {
@@ -59,14 +65,17 @@ type ProxyDependencies = {
   ensureUsableBuckets: typeof ensureUsableBucketsFn
   fetch: typeof fetch
   reporter?: InferenceReporter
+  analytics?: typeof beginModelAnalytics
 }
 
-function readApiKey(request: Request) {
+function readInferenceBearerKey(request: Request) {
   const auth = request.headers.get("authorization")
   if (auth?.toLowerCase().startsWith("bearer ")) {
-    return auth.slice(7).trim()
+    const value = auth.slice(7).trim()
+    return value ? inferenceBearerKey(value) : null
   }
-  return request.headers.get("x-api-key")?.trim() ?? null
+  const value = request.headers.get("x-api-key")?.trim()
+  return value ? inferenceBearerKey(value) : null
 }
 
 function isJsonRequest(request: Request) {
@@ -231,7 +240,12 @@ function secondsUntil(date: Date) {
   return Math.max(0, Math.ceil((date.getTime() - Date.now()) / 1000))
 }
 
-function trackStream(body: ReadableStream<Uint8Array> | null, done: () => Promise<void>, fail: () => Promise<void>) {
+function trackStream(body: ReadableStream<Uint8Array> | null, observer: AnalyticsObserver | null, ok: boolean) {
+  const finish = (status: "completed" | "failed" | "cancelled") => {
+    try { observer?.finish(status) } catch { /* Optional analytics cannot interrupt inference. */ }
+  }
+  const complete = () => finish(ok ? "completed" : "failed")
+  if (!body) complete()
   if (!body) return body
   const reader = body.getReader()
   return new ReadableStream<Uint8Array>({
@@ -239,18 +253,19 @@ function trackStream(body: ReadableStream<Uint8Array> | null, done: () => Promis
       try {
         const chunk = await reader.read()
         if (chunk.done) {
-          await done()
+          complete()
           controller.close()
           return
         }
+        try { observer?.chunk(chunk.value) } catch { /* Forward the original bytes even if observation fails. */ }
         controller.enqueue(chunk.value)
       } catch (error) {
-        await fail()
+        finish("failed")
         controller.error(error)
       }
     },
     async cancel(reason) {
-      await fail()
+      finish("cancelled")
       await reader.cancel(reason)
     },
   })
@@ -497,13 +512,13 @@ export function registerProxyRoutes(app: Hono, dependencies: ProxyDependencies =
   const reporter = dependencies.reporter ?? sentryInferenceReporter
 
   async function handleApiRequest(c: Context) {
-    const rawKey = readApiKey(c.req.raw)
-    if (!rawKey) {
+    const bearerKey = readInferenceBearerKey(c.req.raw)
+    if (!bearerKey) {
       logProxyError("Missing inference API key", { path: c.req.path, method: c.req.method })
       return c.json({ error: { message: "Missing OpenWork inference API key.", type: "authentication_error", code: "missing_api_key" } }, 401)
     }
 
-    const inferenceKey = await dependencies.findActiveInferenceKey(rawKey)
+    const inferenceKey = await dependencies.findActiveInferenceKey(bearerKey)
     if (!inferenceKey) {
       logProxyError("Invalid inference API key", { path: c.req.path, method: c.req.method })
       return c.json({ error: { message: "Invalid OpenWork inference API key.", type: "authentication_error", code: "invalid_api_key" } }, 401)
@@ -620,6 +635,14 @@ export function registerProxyRoutes(app: Hono, dependencies: ProxyDependencies =
 
     const upstreamPath = c.req.path.replace(/^\/api\/v1/, "")
     const upstreamUrl = new URL(`${env.openRouterUpstreamUrl}${upstreamPath}`)
+    const startedAt = Date.now()
+    // Fail closed and bound the optional analytics check; it cannot hold up
+    // inference when the analytics store is unavailable.
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const analytics = await Promise.race([
+      dependencies.analytics?.({ key: inferenceKey, request: c.req.raw, requestId: openworkRequestId, model: prepared.upstreamModel, startedAt }).catch(() => null) ?? null,
+      new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), 250) }),
+    ]).finally(() => { if (timer) clearTimeout(timer) })
     let upstream: Response
     try {
       const upstreamInit: ProxyRequestInit = {
@@ -630,6 +653,7 @@ export function registerProxyRoutes(app: Hono, dependencies: ProxyDependencies =
       }
       upstream = await dependencies.fetch(upstreamUrl, upstreamInit)
     } catch (error) {
+      analytics?.(false).finish("failed")
       logProxyError("Failed to reach OpenRouter upstream", {
         openworkRequestId,
         organizationId: inferenceKey.organization_id,
@@ -679,11 +703,8 @@ export function registerProxyRoutes(app: Hono, dependencies: ProxyDependencies =
 
     const headers = new Headers(upstream.headers)
     headers.set("x-openwork-request-id", openworkRequestId)
-    return new Response(trackStream(
-      upstream.body,
-      async () => {},
-      async () => {},
-    ), { status: upstream.status, statusText: upstream.statusText, headers })
+    return new Response(trackStream(upstream.body, analytics?.(upstream.headers.get("content-type")?.includes("text/event-stream") === true) ?? null, upstream.ok),
+      { status: upstream.status, statusText: upstream.statusText, headers })
   }
 
   app.all("/api/v1", handleApiRequest)

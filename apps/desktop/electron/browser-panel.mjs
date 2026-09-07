@@ -4,7 +4,15 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { app, WebContentsView, clipboard, session, shell } from "electron";
+import { app, BrowserWindow, WebContentsView, clipboard, dialog, session, shell } from "electron";
+import {
+  BACKGROUND_TAB_VIEWPORT,
+  backgroundTabEmulationCommands,
+  createBrowserTabRegistry,
+  foregroundTabEmulationCommands,
+} from "@openwork/browser-tabs";
+import { runDetachedTask } from "./process-resilience.mjs";
+import { listInstalledBrowsers } from "./installed-browsers.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const BROWSER_SESSION_PARTITION = "persist:openwork-browser";
@@ -19,11 +27,26 @@ const MENU_OVERLAY_WIDTH = 196;
 const MENU_OVERLAY_HEIGHT = 176;
 const MENU_OVERLAY_READY_TIMEOUT_MS = 2000;
 
-export function createBrowserPanel({ getWindow, remoteDebugPort, onDeepLink }) {
+export function createBrowserPanel({ getWindow, remoteDebugPort, onDeepLink, checkPolicy }) {
+  let policyRequestHookInstalled = false;
+  function installPolicyRequestHook() {
+    if (policyRequestHookInstalled || !checkPolicy) return;
+    policyRequestHookInstalled = true;
+    // The session request boundary covers normal navigation, redirects, frames,
+    // scripted fetches and CDP navigation; window navigation events do not.
+    session.fromPartition(BROWSER_SESSION_PARTITION).webRequest.onBeforeRequest({ urls: ["<all_urls>"] }, (details, callback) => {
+      if (["about:", "data:", "blob:"].some((scheme) => details.url.startsWith(scheme))) { callback({ cancel: false }); return; }
+      Promise.resolve(checkPolicy({ url: details.url, method: details.method, hasUpload: Boolean(details.uploadData?.length) }))
+        .then(() => callback({ cancel: false }), () => callback({ cancel: true }));
+    });
+  }
+  // tabId -> { tabId, view, favicon, background }. Order, ownership, the active
+  // tab per conversation, and which conversation is on screen live in the
+  // registry; this map only holds the native views.
   const browserTabs = new Map();
-  let browserTabOrder = [];
-  let activeBrowserTabId = null;
+  const registry = createBrowserTabRegistry();
   let browserViewVisible = false;
+  let backgroundWindow = null;
   // Last browser panel bounds reported by the renderer, in renderer CSS pixels.
   // Converted to window device-independent pixels at every setBounds call.
   let lastBrowserBounds = null;
@@ -105,7 +128,7 @@ export function createBrowserPanel({ getWindow, remoteDebugPort, onDeepLink }) {
 
   function routeBlockedMainWindowNavigation(url) {
     if (!/^https?:\/\//i.test(String(url ?? ""))) return;
-    void openBrowserUrlForAutomation(url).catch((error) => {
+    void openBrowserUrlForAutomation(url, "auto", { ownerSessionId: registry.visibleSessionId() }).catch((error) => {
       console.warn("[browser] failed to route blocked main-window navigation", error);
     });
   }
@@ -146,13 +169,22 @@ export function createBrowserPanel({ getWindow, remoteDebugPort, onDeepLink }) {
     throw new Error("Could not resolve built-in browser CDP target.");
   }
 
-  async function openBrowserUrlForAutomation(rawUrl, provider = "auto") {
+  /**
+   * Open a URL for an agent. The tab belongs to the conversation that asked
+   * (`ownerSessionId`). When that conversation is on screen the tab surfaces as
+   * before; otherwise it loads silently in the background — sized, focused,
+   * and painting — without disturbing whatever the user is reading.
+   */
+  async function openBrowserUrlForAutomation(rawUrl, provider = "auto", { ownerSessionId = null } = {}) {
     const requestedProvider = String(provider || "auto").trim().toLowerCase();
     if (requestedProvider && requestedProvider !== "auto" && requestedProvider !== "builtin") {
       throw new Error(`Browser provider is not available yet: ${requestedProvider}`);
     }
     const url = normalizeBrowserUrl(rawUrl);
-    const tab = createBrowserTab("about:blank", { select: true });
+    // The marker page is loaded right away, so skip the blank initialize load:
+    // a queued about:blank navigation would abort this awaited load with
+    // ERR_ABORTED and fail the agent's request before the page ever opens.
+    const tab = createBrowserTab("about:blank", { select: true, initializeBlank: false, ownerSessionId });
     await tab.view.webContents.loadURL(browserTargetMarkerUrl(tab.tabId));
     const targetId = await resolveBrowserCdpTargetId(tab.tabId);
     await tab.view.webContents.loadURL(url);
@@ -162,11 +194,20 @@ export function createBrowserPanel({ getWindow, remoteDebugPort, onDeepLink }) {
       target_id: targetId,
       tab_id: tab.tabId,
       url,
+      owner_session_id: registry.ownerOf(tab.tabId),
+      visible: registry.surfacingFor(tab.tabId) === "foreground",
     };
   }
 
-  function getBrowserTab(tabId = activeBrowserTabId) {
+  function getBrowserTab(tabId = registry.onScreenTabId()) {
     return tabId ? browserTabs.get(tabId) ?? null : null;
+  }
+
+  function tabForView(view) {
+    for (const tab of browserTabs.values()) {
+      if (tab.view === view) return tab;
+    }
+    return null;
   }
 
   function getActiveBrowserView() {
@@ -204,12 +245,14 @@ export function createBrowserPanel({ getWindow, remoteDebugPort, onDeepLink }) {
       status: isLoading ? "loading" : "ready",
       canGoBack: webContents.canGoBack(),
       canGoForward: webContents.canGoForward(),
+      ownerSessionId: registry.ownerOf(tabId),
     };
   }
 
   function listBrowserTabs() {
-    return browserTabOrder
-      .map((tabId) => {
+    return registry
+      .list()
+      .map(({ tabId }) => {
         const tab = browserTabs.get(tabId);
         if (!tab || tab.view.webContents.isDestroyed()) return null;
         return browserTabToPanelTab(tabId, tab);
@@ -219,9 +262,28 @@ export function createBrowserPanel({ getWindow, remoteDebugPort, onDeepLink }) {
 
   function browserStatePayload() {
     return {
-      activeTabId: activeBrowserTabId,
+      activeTabId: registry.onScreenTabId(),
+      activeTabIdByOwner: registry.activeTabIdByOwner(),
+      visibleSessionId: registry.visibleSessionId(),
       tabs: listBrowserTabs(),
     };
+  }
+
+  // Read the actual native hierarchy, not the registry's intended surfacing.
+  // A tab can be logically background while its native view covers the app.
+  function browserNativeViews() {
+    const mainWindow = window();
+    const children = mainWindow?.contentView.children ?? [];
+    return [...browserTabs.values()].map(({ tabId, view }) => {
+      const index = children.indexOf(view);
+      return {
+        tabId,
+        attached: index !== -1,
+        // BrowserWindow's primary renderer is below the entire contentView.
+        aboveApp: index !== -1,
+        bounds: view.getBounds(),
+      };
+    });
   }
 
   function browserTabUrl(tab) {
@@ -250,13 +312,15 @@ export function createBrowserPanel({ getWindow, remoteDebugPort, onDeepLink }) {
     return { x: Math.round(x), y: Math.round(y) };
   }
 
-  function menuOverlayBounds(point) {
+  function menuOverlayBounds(point, size = { width: MENU_OVERLAY_WIDTH, height: MENU_OVERLAY_HEIGHT }) {
     const [contentWidth, contentHeight] = window()?.getContentSize?.() ?? [MENU_OVERLAY_WIDTH, MENU_OVERLAY_HEIGHT];
+    const width = Math.min(size.width, contentWidth);
+    const height = Math.min(size.height, contentHeight);
     return {
-      x: Math.min(Math.max(point.x, 0), Math.max(contentWidth - MENU_OVERLAY_WIDTH - 4, 0)),
-      y: Math.min(Math.max(point.y, 0), Math.max(contentHeight - MENU_OVERLAY_HEIGHT - 4, 0)),
-      width: MENU_OVERLAY_WIDTH,
-      height: MENU_OVERLAY_HEIGHT,
+      x: Math.min(Math.max(point.x, 0), Math.max(contentWidth - width - 4, 0)),
+      y: Math.min(Math.max(point.y, 0), Math.max(contentHeight - height - 4, 0)),
+      width,
+      height,
     };
   }
 
@@ -322,7 +386,9 @@ export function createBrowserPanel({ getWindow, remoteDebugPort, onDeepLink }) {
     menuOverlayShowSerial += 1;
     menuOverlayRequest = null;
     if (!view || !mainWindow) return;
+    const restoreFocus = !view.webContents.isDestroyed() && view.webContents.isFocused?.();
     view.setVisible?.(false);
+    if (!view.webContents.isDestroyed()) view.webContents.send("openwork:menu-overlay:hide");
     try {
       if (mainWindow.contentView.children.includes(view)) {
         mainWindow.contentView.removeChildView(view);
@@ -330,6 +396,7 @@ export function createBrowserPanel({ getWindow, remoteDebugPort, onDeepLink }) {
     } catch {
       // already removed
     }
+    if (restoreFocus && !mainWindow.webContents.isDestroyed()) mainWindow.webContents.focus();
   }
 
   function bringMenuOverlayToTop(view) {
@@ -366,9 +433,40 @@ export function createBrowserPanel({ getWindow, remoteDebugPort, onDeepLink }) {
     const tab = getBrowserTab(String(tabId ?? ""));
     if (!window() || !tab || tab.view.webContents.isDestroyed()) return;
 
-    const showSerial = menuOverlayShowSerial + 1;
-    menuOverlayShowSerial = showSerial;
     const request = tabMenuRequest(tab, point ? scaleRendererPoint(point) : point);
+    await showMenuOverlay(request, ++menuOverlayShowSerial);
+  }
+
+  async function showLinkContextMenu({ url, point, sessionId }) {
+    if (typeof url !== "string" || !isHttpUrl(url) || url.length > 32_768) return;
+    const parsed = new URL(url);
+    if (parsed.username || parsed.password || /[\u0000-\u001f\u007f]/.test(url)) return;
+    if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y)) return;
+    // Capture ownership before discovery; a later focus change must not retarget
+    // the link. Dismissals invalidate pending discovery through the serial.
+    const ownerSessionId = normalizeSessionId(sessionId) ?? registry.visibleSessionId();
+    hideMenuOverlay();
+    const showSerial = ++menuOverlayShowSerial;
+    const browsers = await listInstalledBrowsers();
+    if (showSerial !== menuOverlayShowSerial) return;
+    const items = [
+      { id: "open-builtin", label: "Open in OpenWork" },
+      { id: "open-external", label: "Open in Default Browser" },
+      ...browsers.map(({ id, name }) => ({ id: `browser:${id}`, label: `Open in ${name}` })),
+      { id: "copy-url", label: "Copy Link Address", separatorBefore: true },
+    ];
+    await showMenuOverlay({
+      id: `link-menu:${showSerial}`,
+      source: "link",
+      url,
+      ownerSessionId,
+      browsers,
+      items,
+      bounds: menuOverlayBounds(scaleRendererPoint(point), { width: 264, height: items.length * 36 + 28 }),
+    }, showSerial);
+  }
+
+  async function showMenuOverlay(request, showSerial) {
     const view = await ensureMenuOverlayView();
     if (showSerial !== menuOverlayShowSerial || menuOverlayView !== view) return;
     menuOverlayRequest = request;
@@ -391,15 +489,47 @@ export function createBrowserPanel({ getWindow, remoteDebugPort, onDeepLink }) {
   function handleMenuOverlayChoice(payload) {
     if (!payload || payload.requestId !== menuOverlayRequest?.id) return;
     const request = menuOverlayRequest;
+    if (!request.items.some((item) => item.id === payload.itemId && !item.disabled)) return;
     const tab = getBrowserTab(request.tabId);
     hideMenuOverlay();
+
+    if (request.source === "link" && payload.itemId !== "copy-url") {
+      runDetachedTask("open link", async () => {
+        try {
+          const external = payload.itemId !== "open-builtin";
+          await checkPolicy?.({ url: request.url, external });
+          if (!external) {
+            createBrowserTab(request.url, { ownerSessionId: request.ownerSessionId, initializeBlank: false });
+          } else if (payload.itemId === "open-external") {
+            await shell.openExternal(request.url);
+          } else {
+            const browser = request.browsers.find(({ id }) => `browser:${id}` === payload.itemId);
+            await browser.open(request.url);
+          }
+        } catch {
+          const mainWindow = window();
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            await dialog.showMessageBox(mainWindow, {
+              type: "error", message: "Could not open this link",
+              detail: "Your browser may be unavailable, or your organization may restrict this destination. You can copy the link address instead.",
+            });
+          }
+        }
+      });
+      return;
+    }
 
     switch (payload.itemId) {
       case "copy-url":
         if (request.url) clipboard.writeText(request.url);
         break;
       case "open-external":
-        if (request.url && isHttpUrl(request.url)) void shell.openExternal(request.url);
+        if (request.url && isHttpUrl(request.url)) {
+          runDetachedTask("open browser tab externally", async () => {
+            await checkPolicy?.({ url: request.url, external: true });
+            await shell.openExternal(request.url);
+          });
+        }
         break;
       case "close-tab":
         if (tab) closeBrowserTab(tab.tabId);
@@ -469,7 +599,8 @@ export function createBrowserPanel({ getWindow, remoteDebugPort, onDeepLink }) {
     callback(browserProxy.username, browserProxy.password);
   });
 
-  function createBrowserTab(url = "about:blank", { select = true } = {}) {
+  function createBrowserTab(url = "about:blank", { select = true, initializeBlank = true, ownerSessionId = null } = {}) {
+    installPolicyRequestHook();
     const tabId = createBrowserTabId();
     const view = new WebContentsView({
       webPreferences: {
@@ -481,14 +612,22 @@ export function createBrowserPanel({ getWindow, remoteDebugPort, onDeepLink }) {
         partition: BROWSER_SESSION_PARTITION,
       },
     });
-    const tab = { tabId, view, favicon: null };
+    const tab = { tabId, view, favicon: null, background: false };
     browserTabs.set(tabId, tab);
-    browserTabOrder.push(tabId);
+    registry.add({ tabId, ownerSessionId });
     // Load about:blank immediately to preempt persistent-session restore.
     // Cookies live on the session object, not the document — they survive this.
-    view.webContents.loadURL("about:blank");
+    // Callers that load their own page synchronously opt out, because this
+    // queued navigation would otherwise abort theirs.
+    if (initializeBlank) {
+      runDetachedTask("initialize browser tab", () => view.webContents.loadURL("about:blank"));
+    }
     view.webContents.setWindowOpenHandler(({ url: targetUrl }) => {
-      void shell.openExternal(targetUrl);
+      runDetachedTask("open browser popup", async () => {
+        try { await checkPolicy?.({ url: targetUrl, external: true }); }
+        catch { createBrowserTab(targetUrl, { ownerSessionId, initializeBlank: false }); return; }
+        await shell.openExternal(targetUrl);
+      });
       return { action: "deny" };
     });
     view.webContents.on("did-start-navigation", (_event, targetUrl, isInPlace, isMainFrame) => {
@@ -509,24 +648,31 @@ export function createBrowserPanel({ getWindow, remoteDebugPort, onDeepLink }) {
         setTimeout(() => {
           try {
             if (!view.webContents.isDestroyed()) {
-              view.webContents.loadURL("about:blank");
+              runDetachedTask("clear completed browser handoff", () => view.webContents.loadURL("about:blank"));
             }
             hideBrowserView();
           } catch { /* tab already gone */ }
         }, 200);
         return;
       }
-      // Agent-driven CDP navigation can target a background tab whose view is
-      // detached. Bring that tab on screen, otherwise navigation "succeeds"
-      // while the visible tab stays on about:blank (#2015).
-      if (activeBrowserTabId !== tabId) {
+      // Agent-driven CDP navigation can target a tab whose view is detached.
+      // If the tab's conversation is on screen, bring the tab on screen,
+      // otherwise navigation "succeeds" while the visible tab stays on
+      // about:blank (#2015). A tab that belongs to another conversation only
+      // becomes that conversation's active tab: it must never steal the
+      // screen from what the user is reading.
+      const surfacing = registry.surfacingFor(tabId);
+      if (surfacing === "foreground" && registry.onScreenTabId() !== tabId) {
         try {
           selectBrowserTab(tabId);
         } catch {
           // The tab may be mid-close; the panel-opened event below still fires.
         }
+      } else if (surfacing === "background") {
+        registry.select(tabId);
+        sendBrowserState();
       }
-      sendToRenderer("openwork:browser:panel-opened");
+      sendToRenderer("openwork:browser:panel-opened", { ownerSessionId: registry.ownerOf(tabId) });
     });
     view.webContents.on("did-navigate", () => sendBrowserState());
     view.webContents.on("did-navigate-in-page", () => sendBrowserState());
@@ -537,34 +683,127 @@ export function createBrowserPanel({ getWindow, remoteDebugPort, onDeepLink }) {
     });
     view.webContents.on("did-start-loading", () => sendBrowserState());
     view.webContents.on("did-stop-loading", () => sendBrowserState());
+    view.webContents.on("focus", () => resetViewportEmulation(view));
     view.webContents.once("destroyed", () => {
       browserTabs.delete(tabId);
-      browserTabOrder = browserTabOrder.filter((id) => id !== tabId);
-      if (activeBrowserTabId === tabId) activeBrowserTabId = browserTabOrder[0] ?? null;
+      registry.remove(tabId);
       sendBrowserState();
     });
-    if (select || !activeBrowserTabId) {
+    if (registry.surfacingFor(tabId) === "background") {
+      // Silent: the owner is not on screen. Keep the page real while unseen.
+      if (select) registry.select(tabId);
+      enterBackgroundMode(tab);
+      sendBrowserState();
+    } else if (select || !registry.onScreenTabId()) {
       selectBrowserTab(tabId);
     } else {
       sendBrowserState();
     }
+    if (select) {
+      // Explicit opens select their page in the owner's unified panel. Later
+      // navigations may keep that panel open, but must not displace an artifact
+      // the user selected while a page was loading or refreshing itself.
+      sendToRenderer("openwork:browser:panel-opened", {
+        ownerSessionId: registry.ownerOf(tabId),
+        tab: browserTabToPanelTab(tabId, tab),
+      });
+    }
     const finalUrl = normalizeBrowserUrl(url, "about:blank");
     if (finalUrl !== "about:blank") {
-      view.webContents.loadURL(finalUrl);
+      runDetachedTask("navigate new browser tab", () => view.webContents.loadURL(finalUrl));
     }
     return tab;
   }
 
   function detachBrowserView(view) {
-    const mainWindow = window();
-    if (!mainWindow || !view) return;
-    try {
-      if (mainWindow.contentView.children.includes(view)) {
-        mainWindow.contentView.removeChildView(view);
+    if (!view) return;
+    for (const host of [window(), backgroundWindow]) {
+      try {
+        if (host && !host.isDestroyed() && host.contentView.children.includes(view)) {
+          host.contentView.removeChildView(view);
+        }
+      } catch {
+        // already removed
       }
-    } catch {
-      // already removed
     }
+  }
+
+  function backgroundBrowserWindow() {
+    if (!backgroundWindow || backgroundWindow.isDestroyed()) {
+      backgroundWindow = new BrowserWindow({
+        ...BACKGROUND_TAB_VIEWPORT,
+        show: false,
+        paintWhenInitiallyHidden: true,
+        focusable: false,
+        skipTaskbar: true,
+        webPreferences: { backgroundThrottling: false, sandbox: true },
+      });
+    }
+    return backgroundWindow;
+  }
+
+  // A tab whose conversation is not on screen must still behave like a real
+  // page for the agent driving it: lay out at a real viewport, accept typing as
+  // a focused page, and paint so CDP screenshots work. Park it in a never-shown
+  // window: detached views stop painting, and every child of the main window's
+  // contentView paints above OpenWork, regardless of its child index or bounds.
+  // Moving the same view preserves the document and CDP target.
+  function enterBackgroundMode(tab) {
+    if (!tab || tab.background) return;
+    const webContents = tab.view.webContents;
+    if (webContents.isDestroyed()) return;
+    tab.background = true;
+    detachBrowserView(tab.view);
+    tab.view.setBounds({ x: 0, y: 0, ...BACKGROUND_TAB_VIEWPORT });
+    backgroundBrowserWindow().contentView.addChildView(tab.view);
+    const cdp = webContents.debugger;
+    runDetachedTask("emulate background browser tab", async () => {
+      if (webContents.isDestroyed() || !tab.background) return;
+      if (!cdp.isAttached()) cdp.attach("1.3");
+      for (const { method, params } of backgroundTabEmulationCommands()) {
+        if (!tab.background) return;
+        await cdp.sendCommand(method, params);
+      }
+    });
+  }
+
+  function exitBackgroundMode(tab) {
+    if (!tab || !tab.background) return;
+    tab.background = false;
+    const webContents = tab.view.webContents;
+    detachBrowserView(tab.view);
+    if (webContents.isDestroyed()) return;
+    const cdp = webContents.debugger;
+    if (!cdp.isAttached()) return;
+    runDetachedTask("restore foreground browser tab", async () => {
+      try {
+        for (const { method, params } of foregroundTabEmulationCommands()) {
+          if (webContents.isDestroyed()) return;
+          await cdp.sendCommand(method, params);
+        }
+      } finally {
+        if (!webContents.isDestroyed() && cdp.isAttached()) cdp.detach();
+      }
+    });
+  }
+
+  /** Re-evaluate every tab after the on-screen conversation changed. */
+  function applySurfacing() {
+    for (const tab of browserTabs.values()) {
+      if (registry.surfacingFor(tab.tabId) === "background") enterBackgroundMode(tab);
+      else exitBackgroundMode(tab);
+    }
+  }
+
+  function setVisibleSession(sessionId) {
+    const previous = registry.visibleSessionId();
+    const next = registry.setVisibleSession(sessionId);
+    if (next === previous) return next;
+    hideMenuOverlay();
+    applySurfacing();
+    attachActiveBrowserView();
+    sendBrowserState();
+    return next;
   }
 
   // The renderer reports bounds in CSS pixels, which Electron scales by the main
@@ -598,56 +837,94 @@ export function createBrowserPanel({ getWindow, remoteDebugPort, onDeepLink }) {
     return { x: Math.round(point.x * zoom), y: Math.round(point.y * zoom) };
   }
 
+  // Automation clients (docs shots, screenshot skills, Playwright) attach to a
+  // tab over CDP and emulate a viewport with Emulation.setDeviceMetricsOverride.
+  // Chromium keeps that emulated size after the client disconnects, so the page
+  // keeps laying out for e.g. 1440x900 inside a 400px panel and shows up
+  // clipped. Only a DevTools session that owns an override can drop it: take a
+  // brief session of our own, set a disabled (zero) override, then clear it.
+  // Call this on user-driven moments only — panel show, tab select, focus —
+  // so a capture in progress is not disturbed by background navigation.
+  function resetViewportEmulation(view) {
+    const webContents = view?.webContents;
+    if (!webContents || webContents.isDestroyed()) return;
+    // A background tab's viewport is ours on purpose; it is restored when the
+    // tab comes back on screen.
+    if (tabForView(view)?.background) return;
+    const cdp = webContents.debugger;
+    if (cdp.isAttached()) return;
+    runDetachedTask("reset browser viewport emulation", async () => {
+      cdp.attach("1.3");
+      try {
+        await cdp.sendCommand("Emulation.setDeviceMetricsOverride", {
+          width: 0,
+          height: 0,
+          deviceScaleFactor: 0,
+          mobile: false,
+        });
+        await cdp.sendCommand("Emulation.clearDeviceMetricsOverride");
+      } finally {
+        if (cdp.isAttached()) cdp.detach();
+      }
+    });
+  }
+
+  /** Detach every view that is neither on screen nor a background presence. */
+  function detachIdleBrowserViews(keepView = null) {
+    for (const tab of browserTabs.values()) {
+      if (tab.view !== keepView && !tab.background) detachBrowserView(tab.view);
+    }
+  }
+
   function attachActiveBrowserView() {
     const mainWindow = window();
     if (!mainWindow || !browserViewVisible) return;
-    const view = getActiveBrowserView();
-    if (!view) return;
-    for (const tab of browserTabs.values()) {
-      if (tab.view !== view) detachBrowserView(tab.view);
-    }
-    if (!mainWindow.contentView.children.includes(view)) {
-      mainWindow.contentView.addChildView(view);
-    }
-    if (lastBrowserBounds && lastBrowserBounds.width > 0 && lastBrowserBounds.height > 0) {
-      view.setBounds(scaleRendererBounds(lastBrowserBounds));
+    if (!lastBrowserBounds || lastBrowserBounds.width <= 0 || lastBrowserBounds.height <= 0) return;
+    const tab = getBrowserTab();
+    if (!tab) return;
+    exitBackgroundMode(tab);
+    detachIdleBrowserViews(tab.view);
+    // Size before attaching so a restored view never flashes at stale bounds.
+    tab.view.setBounds(scaleRendererBounds(lastBrowserBounds));
+    if (!mainWindow.contentView.children.includes(tab.view)) {
+      mainWindow.contentView.addChildView(tab.view);
     }
   }
 
   function selectBrowserTab(tabId) {
-    if (!browserTabs.has(tabId)) throw new Error(`Unknown browser tab: ${tabId}`);
+    const tab = browserTabs.get(tabId);
+    if (!tab) throw new Error(`Unknown browser tab: ${tabId}`);
     hideMenuOverlay();
     const previousView = getActiveBrowserView();
-    activeBrowserTabId = tabId;
-    if (previousView && previousView !== getActiveBrowserView()) {
-      detachBrowserView(previousView);
+    registry.select(tabId);
+    if (registry.surfacingFor(tabId) === "foreground") {
+      if (previousView && previousView !== tab.view && !tabForView(previousView)?.background) {
+        detachBrowserView(previousView);
+      }
+      attachActiveBrowserView();
     }
-    attachActiveBrowserView();
     sendBrowserState();
-    return getBrowserTab(tabId);
+    return tab;
   }
 
-  function closeBrowserTab(tabId = activeBrowserTabId) {
+  function closeBrowserTab(tabId = registry.onScreenTabId()) {
     const tab = getBrowserTab(tabId);
     if (!tab) return null;
     if (menuOverlayRequest?.tabId === tabId) hideMenuOverlay();
-    const closingIndex = browserTabOrder.indexOf(tabId);
-    const wasActive = activeBrowserTabId === tabId;
+    const wasOnScreen = registry.onScreenTabId() === tabId;
+    tab.background = false;
     detachBrowserView(tab.view);
     browserTabs.delete(tabId);
-    browserTabOrder = browserTabOrder.filter((id) => id !== tabId);
-    if (wasActive) {
-      const nextTabId =
-        browserTabOrder[Math.min(closingIndex, browserTabOrder.length - 1)] ??
-        browserTabOrder[closingIndex - 1] ??
-        null;
-      activeBrowserTabId = nextTabId;
-      if (nextTabId) {
+    const removed = registry.remove(tabId);
+    if (wasOnScreen) {
+      if (registry.onScreenTabId()) {
         attachActiveBrowserView();
       } else {
         hideBrowserView();
-        sendToRenderer("openwork:browser:panel-closed");
       }
+    }
+    if (removed && !removed.ownerHasTabs) {
+      sendToRenderer("openwork:browser:panel-closed", { ownerSessionId: removed.tab.ownerSessionId });
     }
     try { tab.view.webContents.close(); } catch { /* already destroyed */ }
     sendBrowserState();
@@ -655,37 +932,29 @@ export function createBrowserPanel({ getWindow, remoteDebugPort, onDeepLink }) {
   }
 
   function closeAllBrowserTabs() {
-    const closedTabIds = [...browserTabOrder];
+    const closedTabIds = registry.list().map((tab) => tab.tabId);
     if (closedTabIds.length === 0) return [];
     hideMenuOverlay();
     const tabsToClose = closedTabIds
       .map((tabId) => browserTabs.get(tabId))
       .filter(Boolean);
+    const owners = new Set(closedTabIds.map((tabId) => registry.ownerOf(tabId)));
+    for (const tab of tabsToClose) tab.background = false;
     hideBrowserView();
     browserTabs.clear();
-    browserTabOrder = [];
-    activeBrowserTabId = null;
+    registry.clear();
     for (const tab of tabsToClose) {
       try { tab.view.webContents.close(); } catch { /* already destroyed */ }
     }
-    sendToRenderer("openwork:browser:panel-closed");
+    for (const ownerSessionId of owners) {
+      sendToRenderer("openwork:browser:panel-closed", { ownerSessionId });
+    }
     sendBrowserState();
     return closedTabIds;
   }
 
   function reorderBrowserTabs(tabIds) {
-    const nextOrder = Array.isArray(tabIds) ? tabIds.map(String) : [];
-    if (nextOrder.length !== browserTabOrder.length) {
-      throw new Error("Tab order must include every open tab.");
-    }
-    if (new Set(nextOrder).size !== nextOrder.length) {
-      throw new Error("Tab order must not contain duplicate tabs.");
-    }
-    const current = new Set(browserTabOrder);
-    if (nextOrder.some((tabId) => !current.has(tabId))) {
-      throw new Error("Tab order contains an unknown tab.");
-    }
-    browserTabOrder = nextOrder;
+    registry.reorder(tabIds);
     sendBrowserState();
     return listBrowserTabs();
   }
@@ -700,20 +969,28 @@ export function createBrowserPanel({ getWindow, remoteDebugPort, onDeepLink }) {
    * @param {object} [opts]
    * @param {boolean} [opts.preloadDefault=false] - load default URL if the view has no URL
    * @param {boolean} [opts.ensureTab=false] - create a blank tab if needed
+   * @param {string | null} [opts.sessionId] - the conversation whose panel is showing
    */
-  function attachBrowserView(bounds, { preloadDefault = false, ensureTab = false } = {}) {
+  function attachBrowserView(bounds, { preloadDefault = false, ensureTab = false, sessionId } = {}) {
     if (!window()) return;
     lastBrowserBounds = bounds;
     browserViewVisible = true;
-    if (ensureTab && !activeBrowserTabId) createBrowserTab("about:blank");
+    if (sessionId !== undefined) {
+      const previous = registry.visibleSessionId();
+      if (registry.setVisibleSession(sessionId) !== previous) applySurfacing();
+    }
+    if (ensureTab && !registry.onScreenTabId()) {
+      createBrowserTab("about:blank", { ownerSessionId: registry.visibleSessionId() });
+    }
     const view = getActiveBrowserView();
     attachActiveBrowserView();
     if (bounds.width > 0 && bounds.height > 0) {
       view?.setBounds(scaleRendererBounds(bounds));
     }
+    resetViewportEmulation(view);
     const url = view?.webContents.getURL();
     if (preloadDefault && (!url || url === "about:blank")) {
-      view?.webContents.loadURL(BROWSER_DEFAULT_URL);
+      runDetachedTask("load browser default page", () => view?.webContents.loadURL(BROWSER_DEFAULT_URL));
     }
     sendBrowserState();
   }
@@ -722,9 +999,7 @@ export function createBrowserPanel({ getWindow, remoteDebugPort, onDeepLink }) {
     hideMenuOverlay();
     browserViewVisible = false;
     if (!window()) return;
-    for (const tab of browserTabs.values()) {
-      detachBrowserView(tab.view);
-    }
+    detachIdleBrowserViews();
   }
 
   function destroyBrowserView() {
@@ -734,22 +1009,37 @@ export function createBrowserPanel({ getWindow, remoteDebugPort, onDeepLink }) {
     menuOverlayRequest = null;
     try { overlayView?.webContents.close(); } catch { /* already destroyed */ }
     for (const tab of browserTabs.values()) {
+      tab.background = false;
+      detachBrowserView(tab.view);
       try { tab.view.webContents.close(); } catch { /* already destroyed */ }
     }
     browserTabs.clear();
-    browserTabOrder = [];
-    activeBrowserTabId = null;
+    registry.clear();
+    if (backgroundWindow && !backgroundWindow.isDestroyed()) backgroundWindow.destroy();
+    backgroundWindow = null;
     lastBrowserBounds = null;
     sendBrowserState();
   }
 
+  function normalizeSessionId(value) {
+    return typeof value === "string" && value.trim() ? value : null;
+  }
+
   function registerIpc(ipcMain) {
-    ipcMain.handle("openwork:browser:show", (_event, bounds) => attachBrowserView(bounds));
+    ipcMain.handle("openwork:browser:show", (_event, bounds, sessionId) => (
+      attachBrowserView(bounds, sessionId === undefined ? {} : { sessionId: normalizeSessionId(sessionId) })
+    ));
     ipcMain.handle("openwork:browser:hide", () => hideBrowserView());
-    ipcMain.handle("openwork:browser:openUrl", (_event, url, provider) => openBrowserUrlForAutomation(url, provider));
+    ipcMain.handle("openwork:browser:setVisibleSession", (_event, sessionId) => setVisibleSession(normalizeSessionId(sessionId)));
+    ipcMain.handle("openwork:browser:openUrl", (_event, url, provider, options) => (
+      openBrowserUrlForAutomation(url, provider, {
+        ownerSessionId: normalizeSessionId(options && typeof options === "object" ? options.sessionId : null),
+      })
+    ));
     ipcMain.handle("openwork:browser:navigate", (_event, url) => {
-      const view = getActiveBrowserView() ?? createBrowserTab("about:blank", { select: true }).view;
-      view.webContents.loadURL(normalizeBrowserUrl(url));
+      const view = getActiveBrowserView()
+        ?? createBrowserTab("about:blank", { select: true, ownerSessionId: registry.visibleSessionId() }).view;
+      runDetachedTask("navigate browser tab", () => view.webContents.loadURL(normalizeBrowserUrl(url)));
     });
     ipcMain.handle("openwork:browser:back", () => {
       const webContents = getActiveWebContents();
@@ -767,20 +1057,36 @@ export function createBrowserPanel({ getWindow, remoteDebugPort, onDeepLink }) {
         view.setBounds(scaleRendererBounds(bounds));
       }
     });
-    ipcMain.handle("openwork:browser:state", () => browserStatePayload());
-    ipcMain.handle("openwork:browser:createTab", (_event, url) => {
+    ipcMain.handle("openwork:browser:state", () => ({
+      ...browserStatePayload(),
+      nativeViews: browserNativeViews(),
+      backgroundWindowVisible: Boolean(backgroundWindow && !backgroundWindow.isDestroyed() && backgroundWindow.isVisible()),
+      visibleWindowCount: BrowserWindow.getAllWindows().filter((host) => host.isVisible()).length,
+    }));
+    ipcMain.handle("openwork:browser:createTab", (_event, url, sessionId) => {
       const target = typeof url === "string" && url.trim() ? url : BROWSER_NEW_TAB_URL;
-      const tab = createBrowserTab(target, { select: true });
+      const ownerSessionId = sessionId === undefined ? registry.visibleSessionId() : normalizeSessionId(sessionId);
+      const tab = createBrowserTab(target, { select: true, ownerSessionId });
       return { tabId: tab.tabId };
     });
     ipcMain.handle("openwork:browser:closeTab", (_event, tabId) => closeBrowserTab(tabId == null ? undefined : String(tabId)));
     ipcMain.handle("openwork:browser:closeAllTabs", () => closeAllBrowserTabs());
-    ipcMain.handle("openwork:browser:selectTab", (_event, tabId) => selectBrowserTab(String(tabId ?? "")).tabId);
+    ipcMain.handle("openwork:browser:selectTab", (_event, tabId) => {
+      const tab = selectBrowserTab(String(tabId ?? ""));
+      resetViewportEmulation(tab.view);
+      return tab.tabId;
+    });
     ipcMain.handle("openwork:browser:reorderTabs", (_event, tabIds) => reorderBrowserTabs(tabIds));
     ipcMain.handle("openwork:browser:listTabs", () => listBrowserTabs());
     ipcMain.handle("openwork:browser:setProxy", (_event, proxy) => setBrowserProxy(proxy));
     ipcMain.handle("openwork:browser:getProxy", () => browserProxyState());
     ipcMain.handle("openwork:browser:tabContextMenu", (_event, tabId, point) => showBrowserTabContextMenu(tabId, point));
+    ipcMain.on("openwork:browser:linkContextMenu", (event, payload) => {
+      const mainContents = window()?.webContents;
+      if (event.sender !== mainContents || event.senderFrame !== mainContents?.mainFrame) return;
+      if (!payload || typeof payload !== "object") return;
+      runDetachedTask("show link context menu", () => showLinkContextMenu(payload));
+    });
     ipcMain.handle("openwork:browser:destroy", () => destroyBrowserView());
     ipcMain.on("openwork:menu-overlay:ready", (event) => {
       if (event.sender !== menuOverlayView?.webContents) return;

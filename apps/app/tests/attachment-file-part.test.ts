@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
+import { attachmentNoteToUIParts } from "../src/react-app/domains/session/sync/usechat-adapter";
 import type { ComposerAttachment } from "../src/app/types";
 import {
   buildChatAttachmentInboxPath,
@@ -74,20 +75,25 @@ function uploadRecorder(workspaceId: string) {
   return { endpoint, calls };
 }
 
-function textPart(parts: Awaited<ReturnType<typeof composerAttachmentsToWorkspaceFileParts>>) {
-  const part = parts[0];
-  if (!part || part.type !== "text") throw new Error("Expected first attachment part to be a text note");
-  return part;
+type WorkspaceParts = Awaited<ReturnType<typeof composerAttachmentsToWorkspaceFileParts>>;
+
+function textPart(parts: WorkspaceParts) {
+  if (!parts) throw new Error("Expected attachment parts");
+  return parts.note;
 }
 
-function textPartText(parts: Awaited<ReturnType<typeof composerAttachmentsToWorkspaceFileParts>>) {
+function textPartText(parts: WorkspaceParts) {
   return textPart(parts).text;
 }
 
-function filePartUrl(parts: Awaited<ReturnType<typeof composerAttachmentsToWorkspaceFileParts>>, index: number) {
-  const part = parts[index];
-  if (!part || part.type !== "file") throw new Error(`Expected attachment part ${index} to be a file`);
-  return part.url;
+function filePart(parts: WorkspaceParts, index: number) {
+  const part = parts?.files[index];
+  if (!part) throw new Error(`Expected attachment ${index} to have a file part`);
+  return part;
+}
+
+function filePartUrl(parts: WorkspaceParts, index: number) {
+  return filePart(parts, index).url;
 }
 
 describe("composer attachment file parts", () => {
@@ -291,6 +297,33 @@ describe("composer attachment file parts", () => {
     expect(workspaceInboxPath(inboxPath)).toBe(".opencode/openwork/inbox/chat-attachments/ses_123/nonce-abc-scan one 李.pdf");
   });
 
+  test("bounds long ASCII attachment names while preserving extension and unique id", () => {
+    const filename = `${"a".repeat(400)}.pdf`;
+    const first = buildChatAttachmentInboxPath({ sessionId: "ses_long", id: "nonce-a", filename });
+    const repeated = buildChatAttachmentInboxPath({ sessionId: "ses_long", id: "nonce-a", filename });
+    const second = buildChatAttachmentInboxPath({ sessionId: "ses_long", id: "nonce-b", filename });
+    const basename = first.split("/").pop();
+    if (!basename) throw new Error("Expected attachment basename");
+
+    expect(new TextEncoder().encode(basename).byteLength).toBe(255);
+    expect(basename.startsWith("nonce-a-")).toBe(true);
+    expect(basename.endsWith(".pdf")).toBe(true);
+    expect(first).toBe(repeated);
+    expect(first).not.toBe(second);
+  });
+
+  test("bounds long multibyte attachment names on UTF-8 character boundaries", () => {
+    const filename = `${"李".repeat(200)}.pdf`;
+    const path = buildChatAttachmentInboxPath({ sessionId: "ses_long", id: "nonce-a", filename });
+    const basename = path.split("/").pop();
+    if (!basename) throw new Error("Expected attachment basename");
+
+    expect(new TextEncoder().encode(basename).byteLength).toBe(255);
+    expect(basename.startsWith("nonce-a-")).toBe(true);
+    expect(basename.endsWith(".pdf")).toBe(true);
+    expect(basename).not.toContain("�");
+  });
+
   test("uploads exact bytes to the endpoint workspace id and exposes a worker file URL plus path note", async () => {
     const { endpoint, calls } = uploadRecorder("server-workspace-42");
     const file = new File([PDF_BYTES], "image-only scan.pdf", { type: "application/pdf" });
@@ -316,8 +349,8 @@ describe("composer attachment file parts", () => {
     expect(textPartText(parts).startsWith("Attached files were copied")).toBe(true);
     expect(textPartText(parts)).toContain(".opencode/openwork/inbox/chat-attachments/ses_abc/nonce-a-image-only scan.pdf");
     expect(textPartText(parts)).toContain("Read/Bash/MCP/Docling");
-    expect(filePartUrl(parts, 1)).toBe("file:///workspaces/Worker%20Root/.opencode/openwork/inbox/chat-attachments/ses_abc/nonce-a-image-only%20scan.pdf");
-    expect(parts[1]).toMatchObject({
+    expect(filePartUrl(parts, 0)).toBe("file:///workspaces/Worker%20Root/.opencode/openwork/inbox/chat-attachments/ses_abc/nonce-a-image-only%20scan.pdf");
+    expect(filePart(parts, 0)).toMatchObject({
       type: "file",
       filename: "image-only scan.pdf",
       mime: "application/pdf",
@@ -345,9 +378,9 @@ describe("composer attachment file parts", () => {
     expect(textPart(parts)).toMatchObject({ type: "text", synthetic: true });
     expect(textPartText(parts)).toContain(".opencode/openwork/inbox/chat-attachments/ses_img/nonce-img-shot.png");
     expect(textPartText(parts)).toContain("file:///workspaces/Worker%20Root/.opencode/openwork/inbox/chat-attachments/ses_img/nonce-img-shot.png");
-    expect(filePartUrl(parts, 1).startsWith("data:image/png;base64,")).toBe(true);
-    expect(Array.from(decodedDataUrlBytes(filePartUrl(parts, 1)))).toEqual(Array.from(JPEG_BYTES));
-    expect(parts[1]).toMatchObject({
+    expect(filePartUrl(parts, 0).startsWith("data:image/png;base64,")).toBe(true);
+    expect(Array.from(decodedDataUrlBytes(filePartUrl(parts, 0)))).toEqual(Array.from(JPEG_BYTES));
+    expect(filePart(parts, 0)).toMatchObject({
       type: "file",
       filename: "shot.png",
       mime: "image/png",
@@ -367,15 +400,15 @@ describe("composer attachment file parts", () => {
     });
 
     expect(calls).toHaveLength(1);
-    expect(filePartUrl(parts, 1)).toBe("file:///workspaces/Worker%20Root/.opencode/openwork/inbox/chat-attachments/ses_xml/nonce-xml-sitemap.xml");
-    expect(parts[1]).toMatchObject({
+    expect(filePartUrl(parts, 0)).toBe("file:///workspaces/Worker%20Root/.opencode/openwork/inbox/chat-attachments/ses_xml/nonce-xml-sitemap.xml");
+    expect(filePart(parts, 0)).toMatchObject({
       type: "file",
       filename: "sitemap.xml",
       mime: "text/plain",
     });
   });
 
-  test("workspace binary attachments upload for tool access and emit a Read-mediated text/plain file part", async () => {
+  test("workspace binary attachments upload for tool access without a model-facing file part", async () => {
     const { endpoint, calls } = uploadRecorder("server-workspace-42");
     const file = new File([PPTX_BYTES], "recording.zip", { type: "application/zip" });
 
@@ -396,14 +429,10 @@ describe("composer attachment file parts", () => {
     expect(textPart(parts)).toMatchObject({ type: "text", synthetic: true });
     expect(textPartText(parts)).toContain(".opencode/openwork/inbox/chat-attachments/ses_bin/nonce-bin-recording.zip");
     expect(textPartText(parts)).toContain("Read/Bash/MCP/Docling");
-    // text/plain file parts never reach the provider (opencode expands them
-    // through the Read tool), so binaries keep a transcript badge safely.
-    expect(filePartUrl(parts, 1)).toBe("file:///workspaces/Worker%20Root/.opencode/openwork/inbox/chat-attachments/ses_bin/nonce-bin-recording.zip");
-    expect(parts[1]).toMatchObject({
-      type: "file",
-      filename: "recording.zip",
-      mime: "text/plain",
-    });
+    // A text/plain file part would make opencode run Read on the bytes and
+    // surface "Cannot read binary file" as a session error; the path note is
+    // enough for tools, so the model gets no file part.
+    expect(parts?.files).toEqual([null]);
   });
 
   test("uploads duplicate filenames to distinct non-overwriting paths", async () => {
@@ -429,8 +458,8 @@ describe("composer attachment file parts", () => {
       "chat-attachments/ses_dupes/nonce-b-scan.pdf",
     ]);
     expect(new Set(calls.map((call) => call.path)).size).toBe(2);
-    expect(filePartUrl(parts, 1)).toBe("file:///C:/Users/Ada%20Lovelace/%E5%B7%A5%E4%BD%9C%E5%8C%BA/.opencode/openwork/inbox/chat-attachments/ses_dupes/nonce-a-scan.pdf");
-    expect(filePartUrl(parts, 2)).toBe("file:///C:/Users/Ada%20Lovelace/%E5%B7%A5%E4%BD%9C%E5%8C%BA/.opencode/openwork/inbox/chat-attachments/ses_dupes/nonce-b-scan.pdf");
+    expect(filePartUrl(parts, 0)).toBe("file:///C:/Users/Ada%20Lovelace/%E5%B7%A5%E4%BD%9C%E5%8C%BA/.opencode/openwork/inbox/chat-attachments/ses_dupes/nonce-a-scan.pdf");
+    expect(filePartUrl(parts, 1)).toBe("file:///C:/Users/Ada%20Lovelace/%E5%B7%A5%E4%BD%9C%E5%8C%BA/.opencode/openwork/inbox/chat-attachments/ses_dupes/nonce-b-scan.pdf");
   });
 
   test("fails before producing prompt parts when workspace upload fails", async () => {
@@ -474,4 +503,28 @@ describe("composer attachment file parts", () => {
       createId: () => "nonce-a",
     })).rejects.toThrow("Failed to copy attachment \"scan.pdf\" into this worker workspace: upload was rejected");
   });
+});
+
+test("video upload preserves a display card without a model-facing binary part", async () => {
+  const { endpoint } = uploadRecorder("workspace-a");
+  const parts = await composerAttachmentsToWorkspaceFileParts({
+    attachments: [attachmentFor(new File([new Uint8Array([0, 1, 2, 3])], "recording.MOV"))],
+    endpoint,
+    sessionId: "ses_video",
+    workspaceRoot: "/workspace",
+    createId: () => "video",
+  });
+  if (!parts) throw new Error("Expected uploaded attachment");
+  expect(parts.files).toEqual([null]);
+  const note = { ...parts.note, id: "note", sessionID: "ses_video", messageID: "msg_video" };
+  expect(attachmentNoteToUIParts(note)).toEqual([{
+    type: "file",
+    filename: "recording.MOV",
+    mediaType: "video/quicktime",
+    url: "file:///workspace/.opencode/openwork/inbox/chat-attachments/ses_video/video-recording.MOV",
+    providerMetadata: { opencode: { partId: "note:attachment:0" } },
+  }]);
+  expect(attachmentNoteToUIParts({ ...note, ignored: true })).toEqual([]);
+  expect(attachmentNoteToUIParts({ ...note, synthetic: false })).toEqual([]);
+  expect(attachmentNoteToUIParts({ ...note, metadata: { openworkAttachments: [{ url: "javascript:alert(1)" }] } })).toEqual([]);
 });

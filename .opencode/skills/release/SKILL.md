@@ -1,3 +1,8 @@
+---
+name: release
+description: Cut an OpenWork release, release the app, publish a new version, rerun or recover a release tag, verify release assets. Tag-driven GitHub Actions release that makes zero commits to the repo.
+---
+
 # Skill: release
 
 Cut an OpenWork release. The "Release App" workflow
@@ -37,10 +42,11 @@ format + strictly greater than every other stable tag), stamps the version
 into the CI workspace, builds all 18 electron matrix legs, publishes npm +
 Daytona + AUR, and flips the draft release public.
 
-Requirement: the `v*` tag ruleset must list **GitHub Actions** as a bypass
-actor so the workflow can push the tag it creates. If the tag push is
-rejected, the run fails with instructions — fix the ruleset or fall back to a
-manual tag push.
+The tag ref is created via REST with the org-owned **diff-warden** app token
+(a `v*` ruleset bypass actor; `WARDEN_APP_ID` + `WARDEN_PRIVATE_KEY` in the
+`warden-clearance` environment). The app's tag retriggers the workflow; that duplicate run is skipped by an
+actor guard. If the tag push is rejected, the run fails with instructions —
+fix the ruleset bypass or fall back to a manual admin tag push.
 
 ## Tag-first (expedited, admins only)
 

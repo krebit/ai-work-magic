@@ -1,12 +1,21 @@
 ---
 name: write-a-spec
-description: Write a spec, new e2e test, test a feature end to end, add a slow spec. Use when authoring an @openwork/testkit spec in evals/specs.
+description: Extend or write a journey spec in evals/specs. Use only after the coverage decision says a journey spec is missing an assertion or a new user journey exists.
 ---
 
 # Skill: Write a Spec
 
+## Do not write one when…
+
+- An existing journey spec covers the behaviour; extend it.
+- The change is a pure function; write a colocated unit test, not evidence.
+- You would import `../../apps|packages|ee`, read source files, or spawn another
+  test runner. That is a unit test in disguise; the boundary ratchet rejects it.
+
+One spec per user journey, not per PR; bug fixes add an assertion to the journey they escaped from.
+
 Write new tests in `evals/specs/**/*.test.ts` and import `test` from
-`@openwork/testkit`. App-driving specs use `.slow.test.ts`; the PR lane excludes
+`@openwork/testkit`. App-driving E2E tests use `.e2e.test.ts`; the PR lane excludes
 them. Model setup as resources in dependency order: `needs()` → `server()` →
 `app()`.
 
@@ -35,11 +44,19 @@ them. Model setup as resources in dependency order: `needs()` → `server()` →
 - Never smuggle the answer into the prompt. Assert that the user-facing request
   does not contain connector or resource IDs.
 
+## Mocks
+
+- Use `mcpMock()` witnesses; never exercise real providers from a spec.
+- Witnesses live under `evals/packages/labs/src/`, following `mock-mcp.ts` and
+  the provider-specific `mock-*.ts` fixtures.
+- Keep witnesses deterministic, identity-scoped, and queryable for assertions.
+
 ## Evidence contract
 
-- Evidence is ambient: `screenshot()` records takes, `validate()` claims them
-  whether they pass or fail, and tape facts hold witness assertions.
-- Never create, pass, or manage a roll handle.
+- Test evidence is ambient: `screenshot()` records screenshot artifacts,
+  `validate()` records their visual validations whether they pass or fail, and
+  `recordAssertionEvidence()` holds witness assertions.
+- Never create or pass test-evidence recorder handles in test bodies.
 - Bound every wait.
 - Declare every external requirement in `needs()` so missing dependencies skip
   loudly instead of timing out or weakening coverage.

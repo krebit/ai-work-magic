@@ -99,10 +99,8 @@ Sandbox advertisement (for capability discovery):
 - `DELETE /workspace/:id/commands/:name`
 - `GET /workspace/:id/audit`
 - `GET /workspace/:id/export`
-- `POST /workspace/:id/import/preview`
-- `POST /workspace/:id/import`
 
-Token management (host/owner auth):
+Token management (collaborator or owner bearer token):
 
 - `GET /tokens`
 - `POST /tokens` (body: `{ "scope": "owner"|"collaborator"|"viewer", "label"?: string }`)
@@ -114,13 +112,21 @@ Inbox/outbox:
 - `GET /workspace/:id/artifacts`
 - `GET /workspace/:id/artifacts/:artifactId`
 - `POST /workspace/:id/files/sessions`
-- `POST /files/sessions/:sessionId/renew`
 - `DELETE /files/sessions/:sessionId`
 - `GET /files/sessions/:sessionId/catalog/snapshot`
-- `GET /files/sessions/:sessionId/catalog/events`
-- `POST /files/sessions/:sessionId/read-batch`
-- `POST /files/sessions/:sessionId/write-batch`
 - `POST /files/sessions/:sessionId/ops`
+
+UI control mailbox:
+
+- `POST /experimental/ui-control/request` (collaborator or owner bearer token)
+- `GET /experimental/ui-control/pending` (collaborator or owner bearer token; optional `?wait=1`)
+- `POST /experimental/ui-control/:id/reply` (collaborator or owner bearer token)
+
+Desktop and web renderers poll the same server they are connected to. The first
+polling window claims each request; commands are never broadcast to every tab.
+Requests expire after five seconds, and a server with no recent renderer poll
+returns an explicit no-window result. The external desktop UI MCP bridge remains
+available; in-app tools no longer discover or fall back to that bridge.
 
 OpenCode proxy:
 
@@ -142,3 +148,24 @@ Approvals endpoints:
 - `POST /approvals/:id` with `{ "reply": "allow" | "deny" }`
 
 Set `OPENWORK_APPROVAL_MODE=auto` to auto-approve during local development.
+
+## Automatic title recovery
+
+The managed v1 engine ships a title-only compatibility plugin. If a provider
+returns HTTP 400 with `unsupported_value` or `unsupported_parameter` for
+`reasoning.effort`, `reasoning_effort`, `temperature`, or `top_p`, it makes at
+most one corrected request. It uses a reported supported effort or omits the
+rejected optional parameter so the same model can use its default. Provider,
+model, credentials, conversation content, and normal chat options stay intact.
+Access, quota, transport, and unrelated request errors do not trigger an added
+recovery request. The engine's own transport retry policy still applies.
+
+Engine log records with service `openwork.title` / message `Automatic title
+generation` contain only session/provider/model IDs, outcome, recovery attempt,
+HTTP status, and the rejected parameter name. `accepted_after_recovery` means
+the provider accepted the retry; `title_available` separately confirms a real
+title was observed in a session update. An accepted request with no title update
+within 60 seconds is `title_unconfirmed`, which can mean empty output, a stream
+failure, or missing persistence; it is not reported as success. The app's
+existing bounded placeholder probes and warning remain the user-facing safety
+net. Existing untitled conversations are not bulk-regenerated.

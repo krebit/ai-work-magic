@@ -24,7 +24,9 @@ const SETTINGS: DenSettings = {
 };
 const MINTED: DenMcpToken = {
   token: "mcp-token",
+  appHostToken: "app-host-token",
   expiresAt: new Date(NOW + 7 * 24 * 60 * 60 * 1000).toISOString(),
+  appHostExpiresAt: new Date(NOW + 7 * 24 * 60 * 60 * 1000).toISOString(),
   organizationId: "organization_1",
   scopes: ["mcp:read", "mcp:write"],
   resource: "https://api.openwork.test/mcp",
@@ -89,6 +91,23 @@ function retryableCloudHealth(): OpenworkCloudMcpHealth {
   };
 }
 
+function missingMcpTokenHealth(): OpenworkCloudMcpHealth {
+  const health = cloudHealth(false);
+  return {
+    ...health,
+    phase: "auth_expired",
+    engine: { status: "connected" },
+    firstFailure: {
+      code: "missing_mcp_token",
+      stage: "transport_auth",
+      retryable: false,
+      recommendedAction: "Refresh OpenWork Cloud authentication",
+      message: "openwork-cloud token is missing.",
+      aliases: ["openwork_cloud_auth_required"],
+    },
+  };
+}
+
 function installStorageStub() {
   const values = new Map<string, string>();
   __setCloudMcpUserStateStorageForTest({
@@ -137,6 +156,7 @@ describe("session MCP maintenance", () => {
           headers: { Authorization: "Bearer mcp-token" },
           oauth: false,
         },
+        appHostAuthorization: "Bearer app-host-token",
         tokenMetadata: {
           organizationId: "organization_1",
           expiresAt: MINTED.expiresAt,
@@ -254,6 +274,43 @@ describe("session MCP maintenance", () => {
     })).resolves.toMatchObject({ outcome: "ready", status: "unchanged" });
     expect(mintCount).toBe(0);
     expect(writeCount).toBe(0);
+  });
+
+  test("direct-probes session maintenance so upgraded desktops silently remint missing MCP bearer failures", async () => {
+    let writeCount = 0;
+    const probeOptionsSeen: Array<{ probe?: boolean } | undefined> = [];
+    const client = {
+      baseUrl: "https://worker.openwork.test",
+      listMcp: async () => ({
+        items: [{
+          name: "openwork-cloud",
+          config: { type: "remote", enabled: true, url: "https://api.openwork.test/mcp/agent" },
+        }],
+      }),
+      getOpenworkCloudMcpHealth: async (
+        _workspaceId: string,
+        _providerModel?: unknown,
+        options?: { probe?: boolean },
+      ) => {
+        probeOptionsSeen.push(options);
+        return options?.probe ? missingMcpTokenHealth() : cloudHealth(true);
+      },
+      reconcileOpenworkCloudMcp: async () => {
+        writeCount += 1;
+        return cloudHealth(true);
+      },
+    };
+
+    await expect(syncCloudControlMcpInBackground({
+      client,
+      workspaceId: WORKSPACE_ID,
+      settings: SETTINGS,
+      now: NOW,
+      mintToken: async () => MINTED,
+    })).resolves.toMatchObject({ outcome: "ready", status: "synced" });
+
+    expect(probeOptionsSeen).toEqual([{ probe: true }]);
+    expect(writeCount).toBe(1);
   });
 
   test("keeps independent markers when switching between workspaces", async () => {

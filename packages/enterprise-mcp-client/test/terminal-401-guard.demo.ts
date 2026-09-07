@@ -1,5 +1,5 @@
 /**
- * Runnable demo for the terminal-401 credential guard (fraimz flow
+ * Runnable demo for the terminal-401 credential guard (legacy flow
  * enterprise-mcp-terminal-401-guard). Drives the real createEnterpriseMcpClient
  * through three provider scenarios and prints machine-readable evidence:
  *
@@ -24,8 +24,7 @@ import {
   type EnterpriseMcpOAuthCredential,
   type EnterpriseMcpOAuthPersistence,
 } from "../src/index.js"
-import type { OAuthClientInformationMixed, OAuthTokens } from "@modelcontextprotocol/sdk/shared/auth.js"
-import type { OAuthDiscoveryState } from "@modelcontextprotocol/sdk/client/auth.js"
+import type { OAuthClientInformationMixed, OAuthDiscoveryState, OAuthTokens } from "@modelcontextprotocol/client"
 
 const rpcRequestSchema = z.object({
   id: z.union([z.string(), z.number()]).nullish(),

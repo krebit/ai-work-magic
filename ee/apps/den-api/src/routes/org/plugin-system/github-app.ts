@@ -1,4 +1,5 @@
 import { createHmac, createSign, randomUUID, timingSafeEqual } from "node:crypto"
+import { isAgentPluginManifestSchema } from "./agent-plugin-v1.js"
 
 export class GithubConnectorConfigError extends Error {
   constructor(message: string) {
@@ -27,7 +28,7 @@ export type GithubConnectorAppConfig = {
 
 type GithubFetch = typeof fetch
 
-export type GithubManifestKind = "marketplace" | "plugin" | null
+export type GithubManifestKind = "agent-plugin" | "marketplace" | "plugin" | null
 
 type GithubRepositorySummary = {
   defaultBranch: string | null
@@ -79,12 +80,17 @@ export type GithubInstallStatePayload = {
 
 const GITHUB_API_VERSION = "2022-11-28"
 const GITHUB_INSTALLATION_TOKEN_CACHE_TTL_MS = 55 * 60_000
+const GITHUB_INSTALLATION_TOKEN_REQUEST_TIMEOUT_MS = 15_000
 const GITHUB_REPOSITORY_MAX_PAGES = 30
 const GITHUB_REPOSITORY_PAGE_SIZE = 100
 const githubInstallationTokenCache = new Map<string, { token: string; expiresAtMs: number }>()
+const githubInstallationTokenRequests = new Map<string, Promise<string>>()
+let githubInstallationTokenCacheGeneration = 0
 
 export function clearGithubInstallationTokenCache() {
+  githubInstallationTokenCacheGeneration += 1
   githubInstallationTokenCache.clear()
+  githubInstallationTokenRequests.clear()
 }
 
 // Overridable so @openwork/testkit specs can point the connector at a mock GitHub witness.
@@ -223,6 +229,7 @@ async function requestGithubJson<TResponse>(input: {
   method?: "GET" | "POST"
   path: string
   allowStatuses?: number[]
+  signal?: AbortSignal
 }) {
   const fetchFn = input.fetchFn ?? fetch
   const response = await fetchFn(`${githubApiBase()}${input.path}`, {
@@ -233,6 +240,7 @@ async function requestGithubJson<TResponse>(input: {
       ...input.headers,
     },
     method: input.method ?? "GET",
+    signal: input.signal,
   })
 
   const text = await response.text()
@@ -317,7 +325,7 @@ export async function getGithubInstallationSummary(input: { config: GithubConnec
   } satisfies GithubInstallationSummary
 }
 
-async function createGithubInstallationAccessToken(input: { config: GithubConnectorAppConfig; fetchFn?: GithubFetch; installationId: number }) {
+async function createGithubInstallationAccessToken(input: { config: GithubConnectorAppConfig; fetchFn?: GithubFetch; installationId: number; requestTimeoutMs?: number }) {
   const jwt = createGithubAppJwt(input.config)
   const response = await requestGithubJson<{ token?: string }>({
     fetchFn: input.fetchFn,
@@ -326,6 +334,7 @@ async function createGithubInstallationAccessToken(input: { config: GithubConnec
     },
     method: "POST",
     path: `/app/installations/${input.installationId}/access_tokens`,
+    signal: AbortSignal.timeout(input.requestTimeoutMs ?? GITHUB_INSTALLATION_TOKEN_REQUEST_TIMEOUT_MS),
   })
 
   const token = typeof response.body?.token === "string" ? response.body.token : null
@@ -341,20 +350,35 @@ export async function getGithubInstallationAccessToken(input: {
   fetchFn?: GithubFetch
   installationId: number
   nowMs?: number
+  requestTimeoutMs?: number
 }) {
   const nowMs = input.nowMs ?? Date.now()
+  const generation = githubInstallationTokenCacheGeneration
   const cacheKey = `${input.config.appId}:${input.installationId}`
   const cached = githubInstallationTokenCache.get(cacheKey)
   if (cached && cached.expiresAtMs > nowMs) {
     return cached.token
   }
 
-  const token = await createGithubInstallationAccessToken(input)
-  githubInstallationTokenCache.set(cacheKey, {
-    expiresAtMs: nowMs + GITHUB_INSTALLATION_TOKEN_CACHE_TTL_MS,
-    token,
-  })
-  return token
+  const existingRequest = githubInstallationTokenRequests.get(cacheKey)
+  if (existingRequest) return existingRequest
+
+  const request = createGithubInstallationAccessToken(input)
+  githubInstallationTokenRequests.set(cacheKey, request)
+  try {
+    const token = await request
+    if (generation === githubInstallationTokenCacheGeneration) {
+      githubInstallationTokenCache.set(cacheKey, {
+        expiresAtMs: nowMs + GITHUB_INSTALLATION_TOKEN_CACHE_TTL_MS,
+        token,
+      })
+    }
+    return token
+  } finally {
+    if (githubInstallationTokenRequests.get(cacheKey) === request) {
+      githubInstallationTokenRequests.delete(cacheKey)
+    }
+  }
 }
 
 function normalizeGithubRepository(entry: unknown): GithubRepositorySummary | null {
@@ -483,6 +507,31 @@ async function detectRepositoryManifest(input: { fetchFn?: GithubFetch; ownerAnd
 
   if (pluginResponse.ok) {
     return { manifestKind: "plugin", marketplacePluginCount: null }
+  }
+
+  const agentPluginResponse = await requestGithubJson<{ content?: string; encoding?: string }>({
+    allowStatuses: [404],
+    fetchFn: input.fetchFn,
+    headers: {
+      Authorization: `Bearer ${input.token}`,
+    },
+    path: `/repos/${encodeURIComponent(parts.owner)}/${encodeURIComponent(parts.repo)}/contents/plugin.json`,
+  })
+  if (agentPluginResponse.ok && typeof agentPluginResponse.body?.content === "string" && agentPluginResponse.body.encoding === "base64") {
+    try {
+      const decoded = Buffer.from(agentPluginResponse.body.content.replace(/\n/g, ""), "base64").toString("utf8")
+      const parsed = JSON.parse(decoded) as unknown
+      if (
+        parsed
+        && typeof parsed === "object"
+        && !Array.isArray(parsed)
+        && isAgentPluginManifestSchema((parsed as Record<string, unknown>).$schema)
+      ) {
+        return { manifestKind: "agent-plugin", marketplacePluginCount: null }
+      }
+    } catch {
+      // A malformed root plugin.json is not a supported manifest marker.
+    }
   }
 
   return { manifestKind: null, marketplacePluginCount: null }

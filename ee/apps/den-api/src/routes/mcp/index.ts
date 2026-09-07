@@ -9,11 +9,12 @@ import { db } from "../../db.js"
 import { env } from "../../env.js"
 import { hashOpaqueMcpSecret } from "../../mcp/auth.js"
 import { deriveFirstPartyMcpTokenResourceFromRequest } from "../../mcp/resource.js"
-import { resolveMcpTokenScopes } from "../../mcp/scopes.js"
+import { DEN_MCP_APP_HOST_SCOPE, resolveMcpTokenScopes } from "../../mcp/scopes.js"
 import { DEN_FIRST_PARTY_MCP_TOKEN_TTL_MS } from "../../mcp/token-lifetime.js"
 import {
   jsonValidator,
   orgMemberRoute,
+  userSessionRoute,
   type OrganizationContextVariables,
 } from "../../middleware/index.js"
 import { forbiddenSchema, invalidRequestSchema, jsonResponse, unauthorizedSchema } from "../../openapi.js"
@@ -40,7 +41,9 @@ const mintMcpTokenSchema = z.object({
 
 const mcpTokenResponseSchema = z.object({
   token: z.string(),
+  appHostToken: z.string(),
   expiresAt: z.string().datetime(),
+  appHostExpiresAt: z.string().datetime(),
   organizationId: z.string(),
   scopes: z.array(z.string()),
   resource: z.string(),
@@ -72,24 +75,18 @@ export function registerMcpTokenRoutes<T extends { Variables: McpRouteVariables 
       },
     }),
     orgMemberRoute(),
+    userSessionRoute(),
     jsonValidator(mintMcpTokenSchema),
     async (c) => {
       const user = c.get("user")
       const session = c.get("session")
-      const apiKey = c.get("apiKey")
       const organizationContext = c.get("organizationContext")
       const orgId = organizationContext.organization.id
       const input = c.req.valid("json")
 
-      if (apiKey) {
-        return c.json({
-          error: "forbidden",
-          message: "Use a signed-in user session to mint MCP tokens.",
-        }, 403)
-      }
-
       const scopes = resolveMcpTokenScopes(input.scopes)
       const secret = crypto.randomBytes(32).toString("base64url")
+      const appHostSecret = crypto.randomBytes(32).toString("base64url")
       const expiresAt = new Date(Date.now() + DEN_FIRST_PARTY_MCP_TOKEN_TTL_MS)
 
       let sessionId = null
@@ -99,20 +96,33 @@ export function registerMcpTokenRoutes<T extends { Variables: McpRouteVariables 
         sessionId = null
       }
 
-      await db.insert(OAuthAccessTokenTable).values({
-        id: createDenTypeId("oauthAccessToken"),
-        token: hashOpaqueMcpSecret(secret),
+      const tokenOwner = {
         clientId: DEN_MCP_FIRST_PARTY_CLIENT_ID,
         sessionId,
         userId: normalizeDenTypeId("user", user.id),
         referenceId: normalizeDenTypeId("organization", orgId),
         expiresAt,
-        scopes: JSON.stringify(scopes),
-      })
+      }
+      await db.insert(OAuthAccessTokenTable).values([
+        {
+          id: createDenTypeId("oauthAccessToken"),
+          token: hashOpaqueMcpSecret(secret),
+          ...tokenOwner,
+          scopes: JSON.stringify(scopes),
+        },
+        {
+          id: createDenTypeId("oauthAccessToken"),
+          token: hashOpaqueMcpSecret(appHostSecret),
+          ...tokenOwner,
+          scopes: JSON.stringify(["mcp:read", "mcp:write", DEN_MCP_APP_HOST_SCOPE]),
+        },
+      ])
 
       return c.json({
         token: `${DEN_MCP_OPAQUE_ACCESS_TOKEN_PREFIX}${secret}`,
+        appHostToken: `${DEN_MCP_OPAQUE_ACCESS_TOKEN_PREFIX}${appHostSecret}`,
         expiresAt: expiresAt.toISOString(),
+        appHostExpiresAt: expiresAt.toISOString(),
         organizationId: normalizeDenTypeId("organization", orgId),
         scopes,
         resource: deriveFirstPartyMcpTokenResourceFromRequest(c.req.raw, {

@@ -9,6 +9,11 @@ import {
 } from "node:crypto";
 import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
+import {
+  OAuthError,
+  RegistrationRejectedError,
+  SdkHttpError,
+} from "@modelcontextprotocol/client";
 import type { OAuthDiscoveryState } from "@modelcontextprotocol/sdk/client/auth.js";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
@@ -21,16 +26,18 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import {
   createEnterpriseMcpClient,
+  EnterpriseMcpClientError,
   type EnterpriseMcpConnection,
+  type EnterpriseMcpDiagnosticEvent,
   type EnterpriseMcpOAuthAuthorizationHandle,
   type EnterpriseMcpOAuthClientRegistration,
   type EnterpriseMcpOAuthCredential,
   type EnterpriseMcpOAuthPersistence,
   type EnterpriseMcpPersistenceContext,
+  type EnterpriseMcpRequestPhase,
 } from "@openwork/enterprise-mcp-client";
 import { ApiError } from "./errors.js";
 import { sanitizeDiagnosticString } from "./diagnostic-sanitizer.js";
-import { backupTimestamp } from "./legacy-config-sweep.js";
 import { runtimeStorageDir } from "./runtime-db.js";
 import {
   readRuntimeOpencodeConfig,
@@ -39,7 +46,11 @@ import {
 } from "./runtime-opencode-config-store.js";
 import type { ServerConfig } from "./types.js";
 import { isRecord } from "./workspace-kv-store.js";
-import { assertLocalManagedMcpUrl, createLocalManagedMcpGuardedFetch } from "./local-managed-mcp-url-guard.js";
+import {
+  assertLocalManagedMcpUrl,
+  createLocalManagedMcpGuardedFetch,
+  LocalManagedMcpPrivateUrlError,
+} from "./local-managed-mcp-url-guard.js";
 
 type LocalManagedMcpStatus = "needs_auth" | "connecting" | "connected" | "reconnect_required";
 
@@ -151,6 +162,13 @@ const VAULT_AAD = Buffer.from("openwork-local-managed-mcp-v1", "utf8");
 const VAULT_RECOVERY_REASON = "secure_storage_changed";
 const VAULT_RECOVERED_LAST_ERROR =
   "Secure storage on this device changed, so saved sign-ins were cleared. Reconnect to restore this connection.";
+const MANAGED_MCP_CONNECTION_FAILED_MESSAGE =
+  "OpenWork could not connect to this MCP server. Check its OAuth settings and availability, then try again.";
+const EXTERNAL_HANDSHAKE_REQUEST_PHASES = new Set<EnterpriseMcpRequestPhase>([
+  "oauth-client-registration",
+  "mcp-discovery",
+  "mcp-initialize",
+]);
 const vaultQueueByPath = new Map<string, Promise<void>>();
 const vaultKeyByConfig = new WeakMap<ServerConfig, Promise<Buffer>>();
 const gatewaySecretByConfig = new WeakMap<ServerConfig, Buffer>();
@@ -416,6 +434,18 @@ async function pruneOrphanedManagedRuntimeEntries(config: ServerConfig, vault: L
  * rebuild the vault from the plaintext index (v2) or empty (v1) so members can
  * reconnect instead of hitting raw crypto errors.
  */
+function backupTimestamp(date: Date): string {
+  const parts = [
+    date.getFullYear(),
+    date.getMonth() + 1,
+    date.getDate(),
+    date.getHours(),
+    date.getMinutes(),
+    date.getSeconds(),
+  ];
+  return parts.map((part, index) => String(part).padStart(index === 0 ? 4 : 2, "0")).join("");
+}
+
 async function recoverVaultLocked(config: ServerConfig, file: VaultFileState): Promise<LoadedVault> {
   const path = vaultPath(config);
   const backupName = `${basename(path)}.openwork-backup-${backupTimestamp(new Date())}`;
@@ -666,12 +696,13 @@ async function enterpriseConnection(config: ServerConfig, workspaceId: string, n
   };
 }
 
-function enterpriseClient() {
+function enterpriseClient(diagnostics?: EnterpriseMcpDiagnosticEvent[]) {
   return createEnterpriseMcpClient({
     fetch: guardedFetch,
     clientName: "OpenWork Local MCP Gateway",
     clientVersion: "1.0.0",
     operationTimeoutMs: 45_000,
+    ...(diagnostics ? { diagnosticSink: (event) => diagnostics.push(event) } : {}),
   });
 }
 
@@ -733,8 +764,21 @@ export async function reconcileLocalManagedMcpRuntimeEntries(config: ServerConfi
 }
 
 export async function createLocalManagedMcpConnection(config: ServerConfig, input: CreateLocalManagedMcpInput): Promise<LocalManagedMcpPublicConnection> {
-  const serverUrl = new URL(input.serverUrl).toString();
-  await assertLocalManagedMcpUrl(serverUrl);
+  let serverUrl: string;
+  try {
+    serverUrl = new URL(input.serverUrl).toString();
+  } catch {
+    throw new ApiError(400, "managed_mcp_url_invalid", `Managed MCP server URL "${input.serverUrl}" is invalid.`);
+  }
+  try {
+    await assertLocalManagedMcpUrl(serverUrl);
+  } catch (error) {
+    if (!(error instanceof LocalManagedMcpPrivateUrlError)) throw error;
+    const message = error.message.includes("managed MCP egress requires HTTPS")
+      ? `OpenWork-managed sign-in requires an HTTPS server URL. ${error.message}`
+      : error.message;
+    throw new ApiError(400, "managed_mcp_url_not_allowed", message);
+  }
   const now = Date.now();
   const connection = await withVaultMutation(config, (vault) => {
     const key = connectionKey(input.workspaceId, input.name);
@@ -943,9 +987,120 @@ async function updateConnectionStatus(
   });
 }
 
-async function verifyTools(config: ServerConfig, workspaceId: string, name: string, redirectUri: string): Promise<void> {
+type CompletedRequestDiagnostic = {
+  requestPhase: EnterpriseMcpRequestPhase;
+  outcome: "succeeded" | "failed";
+  httpStatus?: number;
+};
+
+const NETWORK_FAILURE_CODES = new Set([
+  "ConnectionRefused",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "ENETUNREACH",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "ETIMEDOUT",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+]);
+
+function lastHandshakeRequestDiagnostic(
+  diagnostics: EnterpriseMcpDiagnosticEvent[],
+): CompletedRequestDiagnostic | null {
+  for (let index = diagnostics.length - 1; index >= 0; index -= 1) {
+    const event = diagnostics[index];
+    if (!event
+      || event.kind !== "request"
+      || event.outcome === "started"
+      || event.requestPhase === null
+      || !EXTERNAL_HANDSHAKE_REQUEST_PHASES.has(event.requestPhase)) {
+      continue;
+    }
+    return {
+      requestPhase: event.requestPhase,
+      outcome: event.outcome,
+      ...(event.httpStatus === undefined ? {} : { httpStatus: event.httpStatus }),
+    };
+  }
+  return null;
+}
+
+function errorCauseChain(error: unknown): unknown[] {
+  const chain: unknown[] = [];
+  const seen = new Set<unknown>();
+  let current = error;
+  for (let depth = 0; depth < 6 && current !== undefined && current !== null && !seen.has(current); depth += 1) {
+    chain.push(current);
+    seen.add(current);
+    current = isRecord(current)
+      ? current.cause ?? (isRecord(current.data) ? current.data.cause : undefined)
+      : undefined;
+  }
+  return chain;
+}
+
+function hasConcreteRequestCause(error: EnterpriseMcpClientError, diagnostic: CompletedRequestDiagnostic): boolean {
+  const chain = errorCauseChain(error.cause);
+  if (diagnostic.httpStatus !== undefined) {
+    return diagnostic.httpStatus >= 400
+      && diagnostic.httpStatus <= 599
+      && chain.some((cause) => cause instanceof OAuthError
+        || cause instanceof RegistrationRejectedError
+        || cause instanceof SdkHttpError);
+  }
+  return chain.some((cause) => cause instanceof LocalManagedMcpPrivateUrlError
+    || (cause instanceof TypeError && cause.message === "fetch failed")
+    || (isRecord(cause) && typeof cause.code === "string" && NETWORK_FAILURE_CODES.has(cause.code)));
+}
+
+function externalHandshakeApiError(
+  error: unknown,
+  diagnostics: EnterpriseMcpDiagnosticEvent[],
+): ApiError | null {
+  if (!(error instanceof EnterpriseMcpClientError)
+    || error.cause instanceof AggregateError
+    || error.requestPhase === null) {
+    return null;
+  }
+  const recognizedHandshake = (error.operationPhase === "connection-handshake"
+      && error.code === "MCP_CONNECTION_HANDSHAKE_FAILED")
+    || (error.operationPhase === "authorization-callback"
+      && error.code === "MCP_AUTHORIZATION_CALLBACK_FAILED");
+  if (!recognizedHandshake) return null;
+  const request = lastHandshakeRequestDiagnostic(diagnostics);
+  if (!request || request.outcome !== "failed" || !hasConcreteRequestCause(error, request)) return null;
+  return new ApiError(502, "managed_mcp_connection_failed", MANAGED_MCP_CONNECTION_FAILED_MESSAGE);
+}
+
+async function rethrowConnectionFailure(
+  config: ServerConfig,
+  workspaceId: string,
+  name: string,
+  error: unknown,
+  diagnostics: EnterpriseMcpDiagnosticEvent[],
+  internalFallback: string,
+): Promise<never> {
+  const apiError = externalHandshakeApiError(error, diagnostics);
+  await updateConnectionStatus(
+    config,
+    workspaceId,
+    name,
+    "reconnect_required",
+    apiError?.message ?? internalFallback,
+  );
+  throw apiError ?? error;
+}
+
+async function verifyTools(
+  config: ServerConfig,
+  workspaceId: string,
+  name: string,
+  redirectUri: string,
+  diagnostics: EnterpriseMcpDiagnosticEvent[],
+): Promise<void> {
   const connection = await enterpriseConnection(config, workspaceId, name);
-  await enterpriseClient().listTools({ connection, redirectUri });
+  await enterpriseClient(diagnostics).listTools({ connection, redirectUri });
   await updateConnectionStatus(config, workspaceId, name, "connected");
 }
 
@@ -982,18 +1137,18 @@ export async function startLocalManagedMcpAuthorization(config: ServerConfig, wo
   await writeManagedRuntimeEntry(config, workspaceId, name, true);
   const authorizationId = await createAuthorizationState(config, workspaceId, name);
   const redirectUri = localManagedMcpCallbackUrl(config);
+  const diagnostics: EnterpriseMcpDiagnosticEvent[] = [];
   try {
     const connection = await enterpriseConnection(config, workspaceId, name);
-    const result = await enterpriseClient().connect({ connection, redirectUri, authorizationId });
+    const result = await enterpriseClient(diagnostics).connect({ connection, redirectUri, authorizationId });
     if (result.status === "connected") {
-      await verifyTools(config, workspaceId, name, redirectUri);
+      await verifyTools(config, workspaceId, name, redirectUri, diagnostics);
       return { status: "connected" as const };
     }
     await updateConnectionStatus(config, workspaceId, name, "needs_auth");
     return { status: "needs_auth" as const, authorizeUrl: result.authorizeUrl };
   } catch (error) {
-    await updateConnectionStatus(config, workspaceId, name, "reconnect_required", error instanceof Error ? error.message : "Connection failed");
-    throw error;
+    return rethrowConnectionFailure(config, workspaceId, name, error, diagnostics, "Connection failed");
   }
 }
 
@@ -1001,25 +1156,27 @@ export async function completeLocalManagedMcpAuthorization(
   config: ServerConfig,
   state: string,
   code: string,
+  responseIssuer?: string,
 ): Promise<{ connection: LocalManagedMcpPublicConnection; workspaceId: string }> {
   const payload = await verifyAuthorizationState(config, state);
+  const diagnostics: EnterpriseMcpDiagnosticEvent[] = [];
   try {
     const connection = await enterpriseConnection(config, payload.workspaceId, payload.name);
-    await enterpriseClient().completeAuthorization({
+    await enterpriseClient(diagnostics).completeAuthorization({
       connection,
       redirectUri: payload.redirectUri,
       code,
       authorizationId: state,
+      responseIssuer,
     });
-    await verifyTools(config, payload.workspaceId, payload.name, payload.redirectUri);
+    await verifyTools(config, payload.workspaceId, payload.name, payload.redirectUri, diagnostics);
     await writeManagedRuntimeEntry(config, payload.workspaceId, payload.name, true);
     return {
       connection: await getLocalManagedMcpConnection(config, payload.workspaceId, payload.name),
       workspaceId: payload.workspaceId,
     };
   } catch (error) {
-    await updateConnectionStatus(config, payload.workspaceId, payload.name, "reconnect_required", error instanceof Error ? error.message : "Authorization failed");
-    throw error;
+    return rethrowConnectionFailure(config, payload.workspaceId, payload.name, error, diagnostics, "Authorization failed");
   }
 }
 

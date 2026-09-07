@@ -10,8 +10,14 @@ export interface ElectronSurfaceOptions {
     baseUrl: string;
     apiBaseUrl?: string;
     requireSignin?: boolean;
+    /** Seed an installation already activated against its private Den. */
+    enterpriseActivation?: { activatedAt: string; denBaseUrl: string };
   };
   env?: Record<string, string>;
+  /** Root package script used for a source Electron launch. Setting this bypasses OPENWORK_EVAL_ELECTRON_BINARY. */
+  devCommand?: "dev" | "dev:electron";
+  /** Skip host-side sidecar/helper preparation when the caller intentionally uses existing resources. */
+  prepareSharedResources?: boolean;
 }
 
 export interface ChromeSurfaceOptions {

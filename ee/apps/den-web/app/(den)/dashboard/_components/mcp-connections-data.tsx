@@ -43,6 +43,8 @@ export type ExternalMcpConnection = {
   url: string;
   authType: ExternalMcpAuthType;
   credentialMode: ExternalMcpCredentialMode;
+  /** True when granted members may use this connection as a standard MCP server with its own tool catalog. */
+  exposeDirectly: boolean;
   connected: boolean;
   connectedAt: string | null;
   createdByName?: string | null;
@@ -259,7 +261,6 @@ export const mcpConnectionQueryKeys = {
     [...mcpConnectionQueryKeys.all, "tools", orgId ?? "none", connectionId ?? "none"] as const,
   nativeProviderClient: (orgId?: string | null, providerId?: string | null) =>
     [...mcpConnectionQueryKeys.all, "native-provider-client", orgId ?? "none", providerId ?? "none"],
-  telegram: (orgId?: string | null) => [...mcpConnectionQueryKeys.all, "telegram", orgId ?? "none"] as const,
 };
 
 function isExternalMcpTool(value: unknown): value is ExternalMcpTool {
@@ -564,6 +565,7 @@ async function fetchConnections(scope: ExternalMcpConnectionScope, orgId: string
     requiredBy: parseRequiredBy(connection.requiredBy),
     identityManagedBy: parseRequiredBy(connection.identityManagedBy),
     updatedAt: typeof connection.updatedAt === "string" ? connection.updatedAt : null,
+    exposeDirectly: connection.exposeDirectly === true,
     ...(typeof connection.createdByName === "string" || connection.createdByName === null ? { createdByName: connection.createdByName } : {}),
     ...(typeof connection.needsReconnect === "boolean" ? { needsReconnect: connection.needsReconnect } : {}),
     ...(connection.credentialHealth === "unknown" || connection.credentialHealth === "ready" || connection.credentialHealth === "reconnect_required"
@@ -616,6 +618,7 @@ export type CreateMcpConnectionInput = {
   url: string;
   authType: ExternalMcpAuthType;
   credentialMode: ExternalMcpCredentialMode;
+  exposeDirectly?: boolean;
   apiKey?: string;
   oauthClient?: {
     clientId: string;
@@ -643,6 +646,7 @@ export type UpdateMcpConnectionInput = {
   url: string;
   authType: ExternalMcpAuthType;
   credentialMode: ExternalMcpCredentialMode;
+  exposeDirectly: boolean;
   apiKey?: string;
   oauthClient?: {
     clientId: string;
@@ -1081,185 +1085,6 @@ export function useNativeProviderClient(providerId: string, enabled: boolean) {
       }
       return client;
     },
-  });
-}
-
-export type TelegramConnection = {
-  id: string;
-  status: "active" | "error";
-  connected: boolean;
-  bot: { id: string; username: string | null; displayName: string };
-  worker: { id: string; name: string; status: string };
-  webhook: { registered: boolean; lastReceivedAt: string | null; lastError: string | null };
-  pairing: {
-    paired: boolean;
-    chat: { username: string | null; firstName: string | null; pairedAt: string } | null;
-  };
-  createdAt: string;
-  updatedAt: string;
-};
-
-export type TelegramPairing = {
-  url: string;
-  code: string;
-  expiresAt: string;
-};
-
-function requiredString(record: Record<string, unknown>, key: string): string {
-  const value = record[key];
-  if (typeof value !== "string") throw new Error("Telegram connection response was incomplete.");
-  return value;
-}
-
-function nullableString(record: Record<string, unknown>, key: string): string | null {
-  const value = record[key];
-  if (typeof value !== "string" && value !== null) throw new Error("Telegram connection response was incomplete.");
-  return value;
-}
-
-function parseTelegramConnectionValue(value: unknown): TelegramConnection {
-  if (!isRecord(value) || !isRecord(value.bot) || !isRecord(value.worker) || !isRecord(value.webhook) || !isRecord(value.pairing)) {
-    throw new Error("Telegram connection response was incomplete.");
-  }
-  const { bot, worker, webhook, pairing } = value;
-  const chat = pairing.chat;
-  if (
-    (value.status !== "active" && value.status !== "error")
-    || typeof value.connected !== "boolean"
-    || typeof webhook.registered !== "boolean"
-    || typeof pairing.paired !== "boolean"
-    || (chat !== null && !isRecord(chat))
-  ) {
-    throw new Error("Telegram connection response was incomplete.");
-  }
-  return {
-    id: requiredString(value, "id"),
-    status: value.status,
-    connected: value.connected,
-    bot: {
-      id: requiredString(bot, "id"),
-      username: nullableString(bot, "username"),
-      displayName: requiredString(bot, "displayName"),
-    },
-    worker: {
-      id: requiredString(worker, "id"),
-      name: requiredString(worker, "name"),
-      status: requiredString(worker, "status"),
-    },
-    webhook: {
-      registered: webhook.registered,
-      lastReceivedAt: nullableString(webhook, "lastReceivedAt"),
-      lastError: nullableString(webhook, "lastError"),
-    },
-    pairing: {
-      paired: pairing.paired,
-      chat: chat === null ? null : {
-        username: nullableString(chat, "username"),
-        firstName: nullableString(chat, "firstName"),
-        pairedAt: requiredString(chat, "pairedAt"),
-      },
-    },
-    createdAt: requiredString(value, "createdAt"),
-    updatedAt: requiredString(value, "updatedAt"),
-  };
-}
-
-function parseTelegramConnectionPayload(payload: unknown): TelegramConnection | null {
-  if (!isRecord(payload) || !("connection" in payload)) {
-    throw new Error("Telegram connection response was incomplete.");
-  }
-  return payload.connection === null ? null : parseTelegramConnectionValue(payload.connection);
-}
-
-export function useTelegramConnection(enabled: boolean) {
-  const { orgId, runReauthableAction } = useOrgDashboard();
-  return useQuery({
-    enabled: enabled && Boolean(orgId),
-    queryKey: mcpConnectionQueryKeys.telegram(orgId),
-    retry: false,
-    queryFn: async (): Promise<TelegramConnection | null> => {
-      let connection: TelegramConnection | null = null;
-      let loaded = false;
-      await runReauthableAction("load-telegram-connection", async () => {
-        const { response, payload } = await requestJson(
-          "/v1/telegram/connection",
-          { headers: getOrgScopeHeaders(requireOrgId(orgId)) },
-          15000,
-        );
-        if (!response.ok) throw getRequestError(payload, response, `Failed to load Telegram (${response.status}).`);
-        connection = parseTelegramConnectionPayload(payload);
-        loaded = true;
-      });
-      if (!loaded) throw new Error("Telegram connection response was incomplete.");
-      return connection;
-    },
-  });
-}
-
-export function useSaveTelegramConnection() {
-  const queryClient = useQueryClient();
-  const { orgId, runReauthableAction } = useOrgDashboard();
-  return useMutation({
-    mutationFn: async (input: { botToken: string; workerId: string }): Promise<TelegramConnection> => {
-      let connection: TelegramConnection | null = null;
-      await runReauthableAction("save-telegram-connection", async () => {
-        const { response, payload } = await requestJson(
-          "/v1/telegram/connection",
-          { method: "PUT", headers: getOrgScopeHeaders(requireOrgId(orgId)), body: JSON.stringify(input) },
-          30000,
-        );
-        if (!response.ok) throw getRequestError(payload, response, `Failed to connect Telegram (${response.status}).`);
-        connection = parseTelegramConnectionPayload(payload);
-      });
-      if (!connection) throw new Error("Telegram connection response was incomplete.");
-      return connection;
-    },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: mcpConnectionQueryKeys.telegram(orgId) }),
-  });
-}
-
-export function useCreateTelegramPairing() {
-  const queryClient = useQueryClient();
-  const { orgId, runReauthableAction } = useOrgDashboard();
-  return useMutation({
-    mutationFn: async (): Promise<TelegramPairing> => {
-      let pairing: TelegramPairing | null = null;
-      await runReauthableAction("create-telegram-pairing", async () => {
-        const { response, payload } = await requestJson(
-          "/v1/telegram/connection/pairing",
-          { method: "POST", headers: getOrgScopeHeaders(requireOrgId(orgId)), body: JSON.stringify({}) },
-          15000,
-        );
-        if (!response.ok) throw getRequestError(payload, response, `Failed to create Telegram pairing (${response.status}).`);
-        if (!isRecord(payload) || !isRecord(payload.pairing)) throw new Error("Telegram pairing response was incomplete.");
-        pairing = {
-          url: requiredString(payload.pairing, "url"),
-          code: requiredString(payload.pairing, "code"),
-          expiresAt: requiredString(payload.pairing, "expiresAt"),
-        };
-      });
-      if (!pairing) throw new Error("Telegram pairing response was incomplete.");
-      return pairing;
-    },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: mcpConnectionQueryKeys.telegram(orgId) }),
-  });
-}
-
-export function useDeleteTelegramConnection() {
-  const queryClient = useQueryClient();
-  const { orgId, runReauthableAction } = useOrgDashboard();
-  return useMutation({
-    mutationFn: async (): Promise<void> => {
-      await runReauthableAction("delete-telegram-connection", async () => {
-        const { response, payload } = await requestJson(
-          "/v1/telegram/connection",
-          { method: "DELETE", headers: getOrgScopeHeaders(requireOrgId(orgId)) },
-          20000,
-        );
-        if (!response.ok) throw getRequestError(payload, response, `Failed to disconnect Telegram (${response.status}).`);
-      });
-    },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: mcpConnectionQueryKeys.telegram(orgId) }),
   });
 }
 

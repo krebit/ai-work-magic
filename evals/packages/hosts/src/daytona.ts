@@ -3,6 +3,7 @@ import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { setTimeout } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
+import { resolveEvalEngineValue } from "./eval-engine.ts";
 import type { ChromeSurfaceOptions, DenServiceHandle, DenServiceOptions, ElectronSurfaceOptions, Host, ShareLinks, SurfaceHandle } from "./types.ts";
 
 export interface DaytonaExecResult {
@@ -270,8 +271,38 @@ async function orgModeOrDefault(webUrl: string, log: (msg: string) => void): Pro
   }
 }
 
-export async function checkedExec(exec: DaytonaExec, args: string[], context: string, opts: { input?: string; timeoutMs?: number } = {}): Promise<DaytonaExecResult> {
-  const result = await exec(args, opts);
+/**
+ * Daytona CLI transport failures print `level=fatal msg="..."` (HTML error
+ * pages, EOFs, resets from the Daytona API) and mean the remote command never
+ * executed, so retrying is always safe. Remote command failures — a non-zero
+ * exit without a CLI fatal transport message — are never retried.
+ */
+const TRANSIENT_DAYTONA_CLI_MESSAGES = [
+  /invalid character '<'/i,
+  /unexpected EOF/i,
+  /^EOF$/,
+  /unexpected end of JSON input/i,
+  /connection reset/i,
+  /bad gateway/i,
+  /service unavailable/i,
+  /too many requests/i,
+];
+
+function transientDaytonaCliFailure(result: DaytonaExecResult): boolean {
+  if (result.code === 0) return false;
+  const fatalMessages = [...`${result.stderr}\n${result.stdout}`.matchAll(/level=fatal msg="((?:[^"\\]|\\.)*)"/g)]
+    .map((match) => match[1]);
+  return fatalMessages.some((message) => TRANSIENT_DAYTONA_CLI_MESSAGES.some((pattern) => pattern.test(message)));
+}
+
+export async function checkedExec(exec: DaytonaExec, args: string[], context: string, opts: { input?: string; timeoutMs?: number; retryDelayMs?: number } = {}): Promise<DaytonaExecResult> {
+  const attempts = 3;
+  const { retryDelayMs, ...execOpts } = opts;
+  let result = await exec(args, execOpts);
+  for (let attempt = 1; attempt < attempts && transientDaytonaCliFailure(result); attempt += 1) {
+    await setTimeout(retryDelayMs ?? attempt * 2_000);
+    result = await exec(args, execOpts);
+  }
   if (result.code !== 0) {
     const stderr = result.stderr.trim();
     const stdout = result.stdout.trim();
@@ -574,6 +605,7 @@ export function createDaytonaHost(options: DaytonaHostOptions): DaytonaHost {
       }
 
       const env = new Map<string, string>();
+      if (resolveEvalEngineValue(process.env.OPENWORK_EVAL_ENGINE) === "v2") env.set("OPENWORK_ENGINE_V2_PREVIEW", "1");
       appendExtraEnv(env, opts.env);
       env.set("DAYTONA_ELECTRON_LOG", logPath);
       env.set("OPENWORK_ELECTRON_REMOTE_DEBUG_PORT", String(port));
@@ -649,7 +681,7 @@ export function createDaytonaHost(options: DaytonaHostOptions): DaytonaHost {
       `mkdir -p ${shellQuote(profileDir)}`,
       "CHROME_BIN=\"$(command -v chromium || command -v google-chrome || command -v google-chrome-stable || true)\"",
       "if [ -z \"$CHROME_BIN\" ]; then echo 'No chromium/google-chrome binary found in sandbox.' >&2; exit 127; fi",
-      `DISPLAY=:99 nohup "$CHROME_BIN" --headless=new --window-size=1280,900 --no-sandbox --disable-dev-shm-usage --ignore-gpu-blocklist --use-gl=swiftshader --enable-unsafe-swiftshader --disable-http2 --remote-debugging-address=0.0.0.0 --remote-debugging-port=${port} --user-data-dir=${shellQuote(profileDir)} ${shellQuote(startUrl)} >${shellQuote(logPath)} 2>&1 &`,
+      `DISPLAY=:99 nohup "$CHROME_BIN" --headless=new --window-size=1280,900 --no-sandbox --disable-dev-shm-usage --ignore-gpu-blocklist --use-gl=swiftshader --enable-unsafe-swiftshader --remote-debugging-address=0.0.0.0 --remote-debugging-port=${port} --user-data-dir=${shellQuote(profileDir)} ${shellQuote(startUrl)} >${shellQuote(logPath)} 2>&1 &`,
     ].join("; ");
 
     try {

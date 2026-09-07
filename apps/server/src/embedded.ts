@@ -6,6 +6,7 @@
  * of owning the process lifecycle.
  */
 import { randomUUID } from "node:crypto";
+import { managedDesktopPolicy } from "./managed-desktop-policy.js";
 import { mkdir } from "node:fs/promises";
 import { resolveServerConfig, type CliArgs } from "./config.js";
 import {
@@ -25,6 +26,7 @@ import { createManagedOpencodeServer, type ManagedOpencodeServer, type OpencodeE
 import {
   clearTrustedOpencodeProcess,
   createEnginePoolForConfig,
+  createServerLogger,
   registerTrustedOpencodeProcess,
   startServer,
   syncAllWorkspacesRuntimeMcpToEngine,
@@ -32,7 +34,8 @@ import {
 import { ensureLocalWorkspaceFiles } from "./workspace-init.js";
 import { findManagedEngineWorkspace } from "./workspaces.js";
 import { keepOpenworkRuntimeConfigFileFresh, writeOpenworkRuntimeConfigFile } from "./openwork-runtime-config.js";
-import { sweepLegacyOpenCodeConfig } from "./legacy-config-sweep.js";
+import { migrateOpenworkCloudMcpRuntimeConfig } from "./cloud-mcp-health.js";
+import { migrateWorkspaceRuntimeConfigToEngineGlobal } from "./runtime-opencode-config-store.js";
 import { resolveOpencodeModelsUrl } from "./opencode-models-url.js";
 import type { ServeResult } from "./serve-node.js";
 import type { LocalManagedMcpVaultKeyProvider, ServerConfig } from "./types.js";
@@ -68,6 +71,7 @@ export type EmbeddedServerHandle = {
 export async function startEmbeddedServer(options: EmbeddedServerOptions): Promise<EmbeddedServerHandle> {
   const config = await resolveServerConfig(options);
   config.localManagedMcpVaultKey = options.localManagedMcpVaultKey;
+  const logger = createServerLogger(config);
 
   // Spawn managed OpenCode if requested and no explicit base URL was provided.
   let managedOpencode: ManagedOpencodeServer | null = null;
@@ -170,6 +174,8 @@ export async function startEmbeddedServer(options: EmbeddedServerOptions): Promi
 
   if (!config.readOnly) {
     await ensureLocalWorkspaceFiles(config.workspaces);
+    await migrateOpenworkCloudMcpRuntimeConfig(config);
+    await migrateWorkspaceRuntimeConfigToEngineGlobal(config);
   }
 
   // Bind the HTTP server before spawning the engine: serve-node may fall back
@@ -191,13 +197,12 @@ export async function startEmbeddedServer(options: EmbeddedServerOptions): Promi
       // Server-managed config file: the engine re-reads it from disk on every
       // instance rebuild, and keepOpenworkRuntimeConfigFileFresh synchronizes it
       // on every runtime-DB write — so disposes always pick up current state.
-      const { path: runtimeConfigPath } = await writeOpenworkRuntimeConfigFile(config, workspace.id);
-      stopRuntimeConfigFileRefresh = keepOpenworkRuntimeConfigFileFresh(config, workspace.id);
+      const { path: runtimeConfigPath } = await writeOpenworkRuntimeConfigFile(config);
+      stopRuntimeConfigFileRefresh = keepOpenworkRuntimeConfigFileFresh(config);
       const cwd = options.opencodeCwd
         || process.env.OPENWORK_MANAGED_OPENCODE_CWD?.trim()
         || workspace.path;
       await duringStartup(() => mkdir(cwd, { recursive: true }));
-      await sweepLegacyOpenCodeConfig(config).catch(() => undefined);
       const opencodeModelsUrl = await duringStartup(() => resolveOpencodeModelsUrl());
 
       const opencodeBin = options.opencodeBin || process.env.OPENWORK_OPENCODE_BIN;
@@ -208,6 +213,7 @@ export async function startEmbeddedServer(options: EmbeddedServerOptions): Promi
         ...(process.env.OPENWORK_UI_CONTROL_DISCOVERY ? { OPENWORK_UI_CONTROL_DISCOVERY: process.env.OPENWORK_UI_CONTROL_DISCOVERY } : {}),
         OPENWORK_SERVER_URL: serverUrl,
         OPENWORK_SERVER_TOKEN: config.token,
+        OPENWORK_POLICY_TOKEN: managedDesktopPolicy(config).evaluationToken,
         OPENCODE_CONFIG: runtimeConfigPath,
         OPENCODE_MODELS_URL: opencodeModelsUrl,
       };
@@ -281,7 +287,12 @@ export async function startEmbeddedServer(options: EmbeddedServerOptions): Promi
   // workspace's runtime-DB MCPs into the engine so they aren't invisible
   // until a manual reload. Best-effort.
   if (managedOpencode) {
-    void syncAllWorkspacesRuntimeMcpToEngine(config);
+    void syncAllWorkspacesRuntimeMcpToEngine(config).catch((error) => {
+      logger.log("error", "Startup MCP synchronization crashed.", {
+        "mcp.trigger": "startup",
+        "mcp.failure.message": error instanceof Error ? error.message : String(error),
+      });
+    });
   }
 
   if (managedOpencode && engineSpawnTemplate) {

@@ -1,5 +1,7 @@
 import * as React from "react";
 
+import { desktopRestrictionNotice, type DesktopAppRestrictionChecker } from "../../../../app/cloud/desktop-app-restrictions";
+
 import { applyEdits, modify } from "jsonc-parser";
 
 import { t } from "../../../../i18n";
@@ -42,6 +44,7 @@ import type {
   OpenworkServerStatus,
 } from "../../../../app/lib/openwork-server";
 import {
+  DenApiError,
   createDenClient,
   readDenSettings,
   type DenOrgMarketplaceResolved,
@@ -63,6 +66,13 @@ import {
 } from "../../../../app/cloud/desktop-cloud-sync";
 import { notifyEvent } from "../../../shell/notifications";
 import type { OpenworkServerStore } from "../../connections/openwork-server-store";
+import { clearCloudInventoryCache } from "../../connections/cloud-inventory-cache";
+import {
+  denLibraryPluginCreateRequest,
+  waitForListedLibraryPlugin,
+  type CreateLibraryItemInput,
+  type LibraryAuthorableKind,
+} from "../library";
 
 const OPENCODE_SKILL_NAME_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 const OPENCODE_MCP_NAME_RE = /^[A-Za-z0-9_][A-Za-z0-9_-]*$/;
@@ -342,6 +352,7 @@ function toProjectPluginListEntries(
 }
 
 export function createExtensionsStore(options: {
+  checkDesktopAppRestriction: DesktopAppRestrictionChecker;
   client: () => Client | null;
   projectDir: () => string;
   selectedWorkspaceId: () => string;
@@ -1223,10 +1234,21 @@ export function createExtensionsStore(options: {
     }
   }
 
+  // Only manual local changes enter these handlers. Assigned Cloud inventory
+  // continues to reconcile through its separate refresh/sync paths.
+  function extensionMutationDenied() {
+    if (!options.checkDesktopAppRestriction({ restriction: "allowManageExtensions" })) return false;
+    options.setError(desktopRestrictionNotice("allowManageExtensions"));
+    return true;
+  }
+
   async function importCloudOrgPlugin(
     marketplaceId: string | null,
     plugin: DenOrgPlugin,
   ): Promise<{ ok: boolean; message: string; warnings: string[]; files: CloudImportedPluginFile[] }> {
+    if (extensionMutationDenied()) {
+      return { ok: false, message: desktopRestrictionNotice("allowManageExtensions"), warnings: [], files: [] };
+    }
     options.setBusy(true);
     options.setError(null);
     setStateField("cloudOrgMarketplacesStatus", null);
@@ -1284,6 +1306,7 @@ export function createExtensionsStore(options: {
   }
 
   async function installClaudePlugin(url: string): Promise<{ ok: boolean; message: string }> {
+    if (extensionMutationDenied()) return { ok: false, message: desktopRestrictionNotice("allowManageExtensions") };
     options.setBusy(true);
     options.setError(null);
     try {
@@ -1308,6 +1331,7 @@ export function createExtensionsStore(options: {
   }
 
   async function removeCloudOrgPlugin(pluginId: string): Promise<{ ok: boolean; message: string }> {
+    if (extensionMutationDenied()) return { ok: false, message: desktopRestrictionNotice("allowManageExtensions") };
     options.setBusy(true);
     options.setError(null);
     setStateField("cloudOrgMarketplacesStatus", null);
@@ -1732,6 +1756,7 @@ export function createExtensionsStore(options: {
   }
 
   async function addPlugin(pluginNameOverride?: string) {
+    if (extensionMutationDenied()) return;
     const pluginName = (pluginNameOverride ?? snapshot.pluginInput).trim();
     const isManualInput = pluginNameOverride == null;
     const triggerName = stripPluginVersion(pluginName);
@@ -1823,6 +1848,7 @@ export function createExtensionsStore(options: {
   }
 
   async function removePlugin(pluginName: string) {
+    if (extensionMutationDenied()) return;
     const name = pluginName.trim();
     if (!name) return;
     const triggerName = stripPluginVersion(name);
@@ -1906,6 +1932,7 @@ export function createExtensionsStore(options: {
   }
 
   async function importLocalSkill() {
+    if (extensionMutationDenied()) return;
     const isLocalWorkspace = options.workspaceType() === "local";
     if (!isDesktopRuntime()) {
       options.setError(t("skills.desktop_required"));
@@ -1946,6 +1973,7 @@ export function createExtensionsStore(options: {
   }
 
   async function installSkillCreator(): Promise<{ ok: boolean; message: string }> {
+    if (extensionMutationDenied()) return { ok: false, message: desktopRestrictionNotice("allowManageExtensions") };
     const isRemoteWorkspace = options.workspaceType() === "remote";
     const isLocalWorkspace = options.workspaceType() === "local";
     const { openworkSnapshot, openworkClient, openworkWorkspaceId, hasOpenworkTarget } =
@@ -2074,6 +2102,7 @@ export function createExtensionsStore(options: {
   }
 
   async function uninstallSkill(name: string) {
+    if (extensionMutationDenied()) return;
     const trimmed = name.trim();
     if (!trimmed) return;
 
@@ -2151,6 +2180,7 @@ export function createExtensionsStore(options: {
   }
 
   async function saveSkill(input: { name: string; content: string; description?: string }) {
+    if (extensionMutationDenied()) return;
     const trimmed = input.name.trim();
     if (!trimmed) return;
     const root = options.selectedWorkspaceRoot().trim();
@@ -2224,6 +2254,63 @@ export function createExtensionsStore(options: {
       options.setError(addOpencodeCacheHint(message));
     } finally {
       options.setBusy(false);
+    }
+  }
+
+  async function createLibraryItem(
+    kind: LibraryAuthorableKind,
+    input: CreateLibraryItemInput,
+  ): Promise<string> {
+    const description = input.description.trim();
+    const instructions = input.instructions.trim();
+    const drafts = input.components?.filter((component) => component.name.trim() && component.content.trim()) ?? [];
+    if (!input.name.trim()) {
+      throw new Error(t("extensions.add_name_required"));
+    }
+    if (kind === "mcp") {
+      if (!instructions) {
+        throw new Error(t("extensions.add_mcp_url_required"));
+      }
+    } else if (kind !== "plugin") {
+      if (!description) {
+        throw new Error(t("extensions.add_description_required"));
+      }
+      if (!instructions) {
+        throw new Error(t("extensions.add_instructions_required"));
+      }
+    }
+    if (kind === "plugin" && drafts.length === 0) {
+      throw new Error(t("extensions.add_plugin_component_required"));
+    }
+
+    const settings = readDenSettings();
+    const token = settings.authToken?.trim() ?? "";
+    const orgId = settings.activeOrgId?.trim() ?? "";
+    if (!token || !orgId) {
+      throw new Error(t("extensions.add_sign_in_required"));
+    }
+    const client = createDenClient({
+      baseUrl: settings.baseUrl,
+      token,
+    });
+    const body = denLibraryPluginCreateRequest(kind, {
+      ...input,
+      components: kind === "plugin" ? drafts : input.components,
+    });
+    try {
+      await client.setActiveOrganization({ organizationId: orgId });
+      const pluginId = await client.createOrgPlugin(orgId, body);
+      await waitForListedLibraryPlugin(
+        () => client.listMeLibraryPlugins(orgId),
+        pluginId,
+      );
+      clearCloudInventoryCache();
+      return pluginId;
+    } catch (error) {
+      if (error instanceof DenApiError && error.status === 401) {
+        throw new Error(t("extensions.add_unauthorized"));
+      }
+      throw error;
     }
   }
 
@@ -2356,6 +2443,7 @@ export function createExtensionsStore(options: {
     uninstallSkill,
     readSkill,
     saveSkill,
+    createLibraryItem,
     abortRefreshes,
     ensureSkillsFresh,
     ensurePluginsFresh,

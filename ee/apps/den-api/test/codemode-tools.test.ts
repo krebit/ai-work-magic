@@ -21,6 +21,7 @@ let isCodemodeEligibleConnection: typeof import("../src/mcp/codemode-tools.js")[
 let firstUnattendedUnsafeCapability: typeof import("../src/mcp/codemode-tools.js")["firstUnattendedUnsafeCapability"]
 let restrictCodemodeToolTree: typeof import("../src/mcp/codemode-tools.js")["restrictCodemodeToolTree"]
 let sanitizeNamespaceSegment: typeof import("../src/mcp/codemode-tools.js")["sanitizeNamespaceSegment"]
+let stripUndefinedEntries: typeof import("../src/mcp/codemode-tools.js")["stripUndefinedEntries"]
 let parseNativeCapabilityName: typeof import("../src/mcp/native-capabilities.js")["parseNativeCapabilityName"]
 
 beforeAll(async () => {
@@ -38,6 +39,7 @@ beforeAll(async () => {
   firstUnattendedUnsafeCapability = codemodeTools.firstUnattendedUnsafeCapability
   restrictCodemodeToolTree = codemodeTools.restrictCodemodeToolTree
   sanitizeNamespaceSegment = codemodeTools.sanitizeNamespaceSegment
+  stripUndefinedEntries = codemodeTools.stripUndefinedEntries
   parseNativeCapabilityName = nativeCapabilities.parseNativeCapabilityName
 })
 
@@ -45,6 +47,19 @@ test("sanitizes connection names into interpreter-safe namespaces", () => {
   expect(sanitizeNamespaceSegment("Acme Drive")).toBe("acme_drive")
   expect(sanitizeNamespaceSegment("123 / CRM")).toBe("_123_crm")
   expect(sanitizeNamespaceSegment("***")).toBe("_")
+})
+
+test("strips undefined object entries while preserving array positions", () => {
+  expect(stripUndefinedEntries({
+    channel: "bug",
+    omitted: undefined,
+    nested: { omitted: undefined, kept: true },
+    values: [1, undefined, { omitted: undefined, kept: 2 }],
+  })).toEqual({
+    channel: "bug",
+    nested: { kept: true },
+    values: [1, null, { kept: 2 }],
+  })
 })
 
 test("reserves prototype-sensitive connection namespaces", () => {
@@ -124,9 +139,12 @@ test("excludes credential-bound native routes from the Den namespace and manifes
           tags: ["Capability Sources"],
         },
       },
-      "/v1/capabilities/telegram/status": {
+      // Synthetic: every shipped /v1/capabilities/* route is a native provider
+      // today, so this guards the generic rule that only native-provider
+      // prefixes are withheld from tools.den.
+      "/v1/capabilities/other-source/status": {
         get: {
-          operationId: "getV1CapabilitiesTelegramStatus",
+          operationId: "getV1CapabilitiesOtherSourceStatus",
           tags: ["Capability Sources"],
         },
       },
@@ -141,10 +159,10 @@ test("excludes credential-bound native routes from the Den namespace and manifes
 
   expect(built.tools.den?.getCapabilitiesGoogleWorkspaceGmailMessages).toBeUndefined()
   expect(built.tools.den?.getCapabilitiesMicrosoft365CalendarEvents).toBeUndefined()
-  expect(built.tools.den?.getCapabilitiesTelegramStatus).toBeDefined()
+  expect(built.tools.den?.getCapabilitiesOtherSourceStatus).toBeDefined()
   expect(built.tools.den?.getWorkers).toBeDefined()
   const manifestPaths = built.manifest.map((entry) => entry.scriptPath)
-  expect(manifestPaths).toContain("tools.den.getCapabilitiesTelegramStatus")
+  expect(manifestPaths).toContain("tools.den.getCapabilitiesOtherSourceStatus")
   expect(manifestPaths).toContain("tools.den.getWorkers")
   // Absence asserted by scriptPath, not by whole-object equality: extra manifest
   // fields (readOnly/authority) would make an object comparison pass vacuously.

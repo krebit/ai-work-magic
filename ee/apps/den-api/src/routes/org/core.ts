@@ -8,18 +8,19 @@ import { z } from "zod"
 import { auth } from "../../auth.js"
 import { verifyBotProtection } from "../../bot-protection.js"
 import { validateBrandIconUrl } from "../../brand-icon-validation.js"
-import { organizationCloudEnabled } from "../../capability-sources/cloud-rollout.js"
-import { codemodeScriptsEnabled } from "../../capability-sources/codemode-rollout.js"
+import { cloudHostingAvailable } from "../../capability-sources/cloud-hosting.js"
 import { memberFacingMcpConnectionsEnabled } from "../../capability-sources/external-mcp-rollout.js"
 import { organizationInstallLinksEnabled } from "../../capability-sources/install-links-rollout.js"
 import { db } from "../../db.js"
 import { checkEntitlement, getOrganizationEntitlements, parseOrganizationPlan } from "../../entitlements.js"
 import { env } from "../../env.js"
 import { findEnterpriseAuthRequirementForEmailDomain, resolveNonSsoSignInMethodForEmail } from "../../enterprise-auth-requirement.js"
-import { authenticatedRoute, jsonValidator, orgMemberRoute, orgRoleRoute, publicRoute, queryValidator, resolveMemberTeamsMiddleware } from "../../middleware/index.js"
+import { jsonValidator, orgMemberRoute, orgRoleRoute, publicRoute, queryValidator, resolveMemberTeamsMiddleware, userSessionRoute } from "../../middleware/index.js"
 import { denTypeIdSchema, enterprisePlanRequiredSchema, forbiddenSchema, invalidRequestSchema, jsonResponse, notFoundSchema, unauthorizedSchema } from "../../openapi.js"
 import { validateInvitationAcceptVerification } from "../../organization-join-verification.js"
 import { normalizeOrganizationMetadata } from "../../organization-limits.js"
+import { isOpenWorkWebAvailableForOrganization } from "../../openwork-web-availability.js"
+import { getOpenWorkWebAccess } from "../../stripe-billing.js"
 import {
   acceptInvitationForUser,
   createOrganizationForUser,
@@ -110,6 +111,11 @@ const invitationPreviewQuerySchema = z.object({
 const acceptInvitationSchema = z.object({
   id: z.string().trim().min(1).max(255),
 })
+
+const scimDeprovisionedSchema = z.object({
+  error: z.literal("scim_deprovisioned"),
+  message: z.string(),
+}).meta({ ref: "ScimDeprovisionedError" })
 
 const organizationResponseSchema = z.object({
   organization: z.object({}).passthrough().nullable(),
@@ -289,16 +295,9 @@ export function registerOrgCoreRoutes<T extends { Variables: OrgRouteVariables }
         409: jsonResponse("Organization creation is disabled in single-org mode.", singleOrgModeSchema),
       },
     }),
-    authenticatedRoute(),
+    userSessionRoute(),
     jsonValidator(createOrganizationSchema),
     async (c) => {
-    if (c.get("apiKey")) {
-      return c.json({
-        error: "forbidden",
-        message: "API keys cannot create organizations.",
-      }, 403)
-    }
-
     if (env.orgMode === "single_org") {
       return c.json({
         error: "single_org_mode",
@@ -363,21 +362,14 @@ export function registerOrgCoreRoutes<T extends { Variables: OrgRouteVariables }
         400: jsonResponse("The invitation acceptance request body was invalid.", invalidRequestSchema),
         401: jsonResponse("The caller must be signed in to accept an invitation.", unauthorizedSchema),
         403: jsonResponse("API keys cannot accept invitations, or the deployment requires a verified account email.", forbiddenSchema),
-        409: jsonResponse("The current account email is not allowed to join this organization.", accountEmailDomainNotAllowedSchema),
+        409: jsonResponse("The account cannot join this organization.", z.union([accountEmailDomainNotAllowedSchema, scimDeprovisionedSchema])),
         410: jsonResponse("The user previously accepted this invitation, but their workspace access was removed.", membershipRemovedSchema),
         404: jsonResponse("The invitation could not be found.", notFoundSchema),
       },
     }),
-    authenticatedRoute(),
+    userSessionRoute(),
     jsonValidator(acceptInvitationSchema),
     async (c) => {
-    if (c.get("apiKey")) {
-      return c.json({
-        error: "forbidden",
-        message: "API keys cannot accept organization invitations.",
-      }, 403)
-    }
-
     const user = c.get("user")
     const input = c.req.valid("json")
     const email = getRequiredUserEmail(user)
@@ -422,6 +414,12 @@ export function registerOrgCoreRoutes<T extends { Variables: OrgRouteVariables }
         error: "membership_removed",
         message: "Your access to this workspace was removed. Ask a workspace admin for a new invite.",
       }, 410)
+    }
+    if (accepted.status === "scim_deprovisioned") {
+      return c.json({
+        error: "scim_deprovisioned",
+        message: "This member is managed by your identity provider. Restore their access in the IdP.",
+      }, 409)
     }
 
     await setRequestActiveOrganization(c, accepted.member.organizationId)
@@ -664,7 +662,11 @@ export function registerOrgCoreRoutes<T extends { Variables: OrgRouteVariables }
       }
 
       const owner = payload.members.find((member: typeof payload.members[number]) => member.isOwner) ?? null
-      const cloudEnabled = organizationCloudEnabled(payload.organization.metadata, { orgMode: env.orgMode })
+      // Cloud is entitled by OpenWork Web access (paid subscription or the
+      // platform-admin complimentary grant) on hosted deployments; there is no
+      // separate per-organization Cloud rollout flag.
+      const cloudEnabled = cloudHostingAvailable({ orgMode: env.orgMode })
+        && (await getOpenWorkWebAccess(payload.organization.id)).hasAccess
       const [ssoRows, scimRows] = await Promise.all([
         db
           .select({ id: SsoConnectionTable.id })
@@ -697,15 +699,26 @@ export function registerOrgCoreRoutes<T extends { Variables: OrgRouteVariables }
         plan: parseOrganizationPlan(payload.organization.metadata),
         entitlements: getOrganizationEntitlements(payload.organization.metadata),
         capabilities: {
+          // Protocol capability: clients must see this explicit signal before
+          // calling the dashboard routes. Older Den versions omit the field,
+          // allowing newer Desktop builds to fail closed during a staggered
+          // rollout instead of calling an endpoint that does not exist yet.
+          orgManagedDashboards: true,
           // Expose the effective value, not the raw stored flag: Connect is
           // member-facing default-on unless an explicit org kill switch says no.
           mcpConnections: memberFacingMcpConnectionsEnabled(payload.organization.metadata, {
             gatingEnabled: env.mcpConnectionsGatingEnabled,
           }),
-          codemodeScripts: codemodeScriptsEnabled(payload.organization.metadata),
+          // Workflows/Code Mode are enabled for every organization; the field
+          // remains for published clients that still read it.
+          workflows: true,
           installLinks: organizationInstallLinksEnabled(payload.organization.metadata, {
             gatingEnabled: env.installLinksGatingEnabled,
           }),
+          // Effective offer: the deployment switch enables Web generally,
+          // while the platform-admin complimentary grant enables only this
+          // organization when the deployment switch is off.
+          openworkWeb: isOpenWorkWebAvailableForOrganization(payload.organization.metadata),
           ...(cloudEnabled ? { cloud: true } : {}),
         },
         authMethods: {

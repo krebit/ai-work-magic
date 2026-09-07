@@ -3,11 +3,10 @@ name: Warden
 # Trigger types must stay aligned with the warden.toml trigger actions:
 # an event that runs this workflow but matches no warden trigger would
 # produce findings_count=0 without analysis and wrongly grant clearance.
-# (ready_for_review is deliberately absent — warden does not support it;
-# draft-to-ready PRs get analyzed on their next push.)
+# Analyze drafts as they evolve, then refresh the review when they become ready.
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, ready_for_review]
     branches: [dev]
 
 permissions:
@@ -22,23 +21,20 @@ concurrency:
   group: warden-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
-env:
-  WARDEN_MODEL: ${{ secrets.WARDEN_MODEL }}
-  WARDEN_OPENAI_API_KEY: ${{ secrets.WARDEN_OPENAI_API_KEY }}
-
 jobs:
   warden:
-    # Skip drafts and fork PRs: forks have no secrets, so analysis cannot
-    # run (and clearance is fork-blocked in warden-clearance.yml anyway).
+    # Fork PRs have no secrets, so analysis cannot run there (and clearance
+    # is fork-blocked in warden-clearance.yml anyway). Drafts are reviewed too.
     if: >-
-      !github.event.pull_request.draft &&
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      WARDEN_MODEL: ${{ secrets.WARDEN_MODEL }}
+      WARDEN_OPENAI_API_KEY: ${{ secrets.WARDEN_OPENAI_API_KEY }}
     steps:
       - name: Checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-
       - name: Analyze
         id: analyze
         uses: getsentry/warden@8759014a14130cd2b82e59d3fb450a7385721221 # v0
@@ -51,7 +47,8 @@ jobs:
           mode: report
           findings-file: ${{ steps.analyze.outputs.findings-file }}
 
-      # Consumed by warden-clearance.yml (workflow_run). blocking_count excludes
+      # Consumed by warden-clearance.yml (workflow_run). security_count also
+      # includes confidentiality-review findings (all blocking). blocking_count excludes
       # advisory desktop↔den sync findings so they notify without withholding
       # clearance. The clearance workflow refuses to act on PRs that touch review
       # machinery, so this artifact cannot be forged without tripping that guard.
@@ -66,7 +63,7 @@ jobs:
 
           if [ -n "$FINDINGS_FILE" ] && [ -f "$FINDINGS_FILE" ] && counts="$(jq -ce '
             {
-              security_count: ([.skills[] | select(.name == "diff-security-review") | .findings | length] | add // 0),
+              security_count: ([.skills[] | select(.name == "diff-security-review" or .name == "confidentiality-review") | .findings | length] | add // 0),
               sync_blocking_count: ([.skills[] | select(.name == "desktop-den-sync-review") | .findings[] | select(.severity != "medium" and .severity != "low")] | length),
               sync_advisory_count: ([.skills[] | select(.name == "desktop-den-sync-review") | .findings[] | select(.severity == "medium" or .severity == "low")] | length)
             }

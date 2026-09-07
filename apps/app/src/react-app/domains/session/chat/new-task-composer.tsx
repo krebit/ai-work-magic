@@ -2,11 +2,14 @@
 import { useRef, useState } from "react";
 import type { Agent } from "@opencode-ai/sdk/v2/client";
 
+import type { CloudImportedPlugin } from "@/app/cloud/import-state";
 import { createDenClient, readDenSettings } from "@/app/lib/den";
 import type { OpenworkServerClient } from "@/app/lib/openwork-server";
 import type { ComposerAttachment, McpServerEntry, McpStatusMap, ModelOption, ModelRef, SkillCard, SlashCommandOption } from "@/app/types";
 import { t } from "@/i18n";
+import type { ComposerSettingsSection } from "@/react-app/domains/settings/library";
 import { ReactSessionComposer } from "@/react-app/domains/session/surface/composer/composer";
+import { WorkspaceRunModeMenu } from "@/react-app/domains/session/surface/composer/workspace-run-mode-menu";
 import { encodeComposerMentionValue, type ComposerMentionKind } from "@/react-app/domains/session/surface/composer/mention-encoding";
 import {
   createPastedTextChip,
@@ -18,7 +21,7 @@ import {
   readCachedConnectCapabilities,
   readCloudInventoryScope,
 } from "@/react-app/domains/connections/cloud-inventory-cache";
-import { EMPTY_CONNECT_CAPABILITY_INVENTORY } from "@/react-app/domains/session/surface/connect-capability-inventory";
+import { connectPluginsForComposer, EMPTY_CONNECT_CAPABILITY_INVENTORY } from "@/react-app/domains/session/surface/connect-capability-inventory";
 import { resolveAttachmentFileMetadata } from "@/react-app/domains/session/sync/attachment-file-part";
 
 /**
@@ -38,7 +41,7 @@ export type NewTaskComposerContext = {
   onRefreshOrganizationModels?: () => void | Promise<void>;
   modelPickerOpen: boolean;
   onModelPickerOpenChange: (open: boolean) => void;
-  onModelChange: (model: ModelRef) => void;
+  onModelChange: (model: ModelRef, variant?: string | null) => void;
   openWorkModelsEntitled?: boolean;
   openWorkModelsSyncing?: boolean;
   modelVariantLabel: string;
@@ -53,7 +56,7 @@ export type NewTaskComposerContext = {
   searchFiles: (query: string) => Promise<string[]>;
   isRemoteWorkspace: boolean;
   isSandboxWorkspace: boolean;
-  onOpenSettingsSection?: (section: "commands" | "skills" | "mcps" | "plugins" | "extensions") => void;
+  onOpenSettingsSection?: (section: ComposerSettingsSection) => void;
 };
 
 export type NewTaskComposerProps = {
@@ -86,9 +89,11 @@ export function NewTaskComposer(props: NewTaskComposerProps) {
   const [mcpServers, setMcpServers] = useState<McpServerEntry[]>([]);
   const [mcpStatuses, setMcpStatuses] = useState<McpStatusMap>({});
   const [mcpStatus, setMcpStatus] = useState<string | null>(null);
+  const [importedPlugins, setImportedPlugins] = useState<CloudImportedPlugin[]>([]);
   const [pastedText, setPastedText] = useState<PastedTextChip[]>([]);
   const skillsConnectPushRef = useRef(0);
   const mcpConnectPushRef = useRef(0);
+  const pluginConnectPushRef = useRef(0);
   const context = props.context;
   const workspaceClient = context?.client ?? null;
   const workspaceId = context?.workspaceId ?? null;
@@ -149,6 +154,20 @@ export function NewTaskComposer(props: NewTaskComposerProps) {
         return { servers, statuses, status };
       }
     : undefined;
+
+  const listImportedPlugins = async (): Promise<CloudImportedPlugin[]> => {
+    const pushId = ++pluginConnectPushRef.current;
+    const scope = readCloudInventoryScope();
+    const cachedConnect = (scope ? readCachedConnectCapabilities(scope) : null) ?? EMPTY_CONNECT_CAPABILITY_INVENTORY;
+    const connectPromise = loadSessionConnectCapabilities();
+    void connectPromise.then((connect) => {
+      if (pluginConnectPushRef.current !== pushId) return;
+      setImportedPlugins(connectPluginsForComposer(connect.plugins));
+    });
+    const plugins = connectPluginsForComposer(cachedConnect.plugins);
+    setImportedPlugins(plugins);
+    return plugins;
+  };
 
   const handleInsertMention = (kind: ComposerMentionKind, value: string) => {
     // @agent mentions switch the pending task's agent instead of inserting a
@@ -235,6 +254,7 @@ export function NewTaskComposer(props: NewTaskComposerProps) {
 
   return (
     <ReactSessionComposer
+      runModeControl={<WorkspaceRunModeMenu client={workspaceClient} workspaceId={workspaceId} busy={props.busy} />}
       draft={props.draft}
       mentions={mentions}
       onDraftChange={handleDraftChange}
@@ -280,6 +300,8 @@ export function NewTaskComposer(props: NewTaskComposerProps) {
       mcpServers={mcpServers}
       mcpStatus={mcpStatus}
       mcpStatuses={mcpStatuses}
+      listImportedPlugins={listImportedPlugins}
+      importedPlugins={importedPlugins}
       onOpenSettingsSection={context?.onOpenSettingsSection}
       recentFiles={[]}
       searchFiles={context?.searchFiles ?? emptyFiles}
